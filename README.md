@@ -1,5 +1,8 @@
 # Claude Govee Lights
 
+[![CI](https://github.com/FlashGalatine/claude-govee-lights/actions/workflows/ci.yml/badge.svg)](https://github.com/FlashGalatine/claude-govee-lights/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Your Govee lights react to what Claude Code is doing — dim blue when idle, purple
 breathing while it thinks, a coloured chase across the segments while it runs a tool,
 and an urgent amber pulse when it is waiting on you.
@@ -123,6 +126,22 @@ Leave `Devices` empty to drive every LAN-enabled device automatically.
 **`OnSessionEnd` cannot restore what was there before.** The Govee API exposes no way to
 read a device's current colour, so `rest` means "apply `RestColor`". If you use these
 lights as room lighting and care about getting a scene back, use `off`.
+
+## Development
+
+```powershell
+scripts\Build.ps1 -Restart      # build, stage to dist\, restart the daemon
+scripts\Test-Repo.ps1           # static checks - no hardware needed
+scripts\Test-Resilience.ps1     # proves a dead daemon cannot stall a session
+scripts\Replay-Hooks.ps1        # drive a full session's worth of hooks
+scripts\Demo-Govee.ps1          # narrated visual test across every device
+```
+
+CI runs `Test-Repo.ps1` and builds on `windows-latest`. It cannot drive lights — no
+Govee Desktop on a runner — so it guards the invariants that break silently instead:
+that the `App.config` binding redirect reaches the build output, that `hooks.json` stays
+in sync with the scripts and port it references, and that the daemon starts, logs and
+exits cleanly rather than hanging.
 
 ## Troubleshooting
 

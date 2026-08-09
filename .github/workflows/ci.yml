@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref rather than queueing them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify
+    # Must be Windows: the daemon targets net48 and links GoveeAPI.dll, a .NET
+    # Framework assembly. There is no cross-platform path here.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Static checks first so obvious breakage fails in seconds rather than
+      # after a full restore and build.
+      - name: Static checks
+        shell: pwsh
+        run: ./scripts/Test-Repo.ps1 -SkipBuildOutput
+
+      - name: Restore
+        run: dotnet restore src/GoveeLights.Daemon/GoveeLights.Daemon.csproj
+
+      - name: Build
+        run: dotnet build src/GoveeLights.Daemon/GoveeLights.Daemon.csproj -c Release --no-restore -warnaserror
+
+      - name: Stage to dist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/daemon | Out-Null
+          Copy-Item src/GoveeLights.Daemon/bin/Release/net48/* -Destination dist/daemon -Recurse -Force
+          Get-ChildItem dist/daemon | Select-Object Name, Length | Format-Table -AutoSize
+
+      # The whole point of CI for this project. The compiler is perfectly happy
+      # without the bindingRedirect, but at runtime every Govee call would time
+      # out after ~6s and report a bogus "API GUID error". A build that compiles
+      # and cannot talk to the hardware is the regression worth catching.
+      - name: Verify binding redirect survived into build output
+        shell: pwsh
+        run: ./scripts/Test-Repo.ps1
+
+      - name: Verify the executable starts and fails fast
+        shell: pwsh
+        run: |
+          $exe = 'dist/daemon/GoveeLightsDaemon.exe'
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+
+          # A runner has no Govee Desktop, so the daemon cannot connect. What it must
+          # still do is start, load config, log, and exit cleanly rather than hang or
+          # crash - which exercises assembly loading, App.config binding, JSON and
+          # logging in one go.
+          #
+          # Seed a config with no GUID so the outcome is deterministic. Relying on the
+          # GUID file simply being absent would silently change behaviour the day
+          # someone commits one.
+          $dir = Join-Path $env:LOCALAPPDATA 'ClaudeGovee'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          '{"Enabled":true,"ApiGuid":"","Port":17321}' | Set-Content (Join-Path $dir 'config.json') -Encoding UTF8
+
+          $p = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          if (-not $p.WaitForExit(30000)) {
+            $p.Kill()
+            throw "Daemon did not exit within 30s. With no GUID it must fail fast."
+          }
+          Write-Host "Daemon exited with code $($p.ExitCode)"
+
+          $log = Join-Path $dir 'logs'
+          if (Test-Path $log) {
+            Write-Host '--- daemon log ---'
+            Get-ChildItem $log -Filter *.log | Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1 | Get-Content | Select-Object -Last 20
+          } else {
+            throw 'Daemon wrote no log; logging is broken.'
+          }
+
+          # 2 = "no apiGuid configured", the documented fail-fast path.
+          if ($p.ExitCode -ne 2) {
+            throw "Expected exit code 2 (no apiGuid), got $($p.ExitCode)."
+          }
+
+      - name: Upload daemon
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoveeLightsDaemon
+          path: dist/daemon/
+          retention-days: 14
+
+  plugin:
+    name: Validate plugin manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap cross-platform guard on the files Claude Code parses. Catches a
+      # malformed manifest without waiting on a Windows runner.
+      - name: Validate JSON
+        run: |
+          set -euo pipefail
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json \
+                   hooks/hooks.json config/config.example.json; do
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+            echo "ok   $f"
+          done
+
+      - name: Check hook event names are known
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, sys
+
+          # Events documented by Claude Code. An unknown name here means a typo that
+          # would silently never fire.
+          KNOWN = {
+              "SessionStart", "SessionEnd", "Setup",
+              "UserPromptSubmit", "UserPromptExpansion", "Stop", "StopFailure",
+              "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch",
+              "PermissionRequest", "PermissionDenied",
+              "SubagentStart", "SubagentStop", "TeammateIdle",
+              "TaskCreated", "TaskCompleted",
+              "FileChanged", "ConfigChange", "CwdChanged", "DirectoryAdded",
+              "InstructionsLoaded", "WorktreeCreate", "WorktreeRemove",
+              "Elicitation", "ElicitationResult", "Notification", "MessageDisplay",
+              "PreCompact", "PostCompact",
+          }
+
+          hooks = json.load(open("hooks/hooks.json"))["hooks"]
+          bad = sorted(set(hooks) - KNOWN)
+          if bad:
+              print("Unknown hook events: " + ", ".join(bad), file=sys.stderr)
+              sys.exit(1)
+          print(f"ok   {len(hooks)} hook events, all recognised")
+          PY

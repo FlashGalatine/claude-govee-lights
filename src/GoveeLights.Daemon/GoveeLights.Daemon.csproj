@@ -26,4 +26,11 @@
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Supplies net48 reference assemblies so the build does not depend on a
+         targeting pack being installed. Build-time only - nothing ships. This is
+         what lets CI compile on a clean runner. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
 </Project>
