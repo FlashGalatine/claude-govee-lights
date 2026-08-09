@@ -1,0 +1,13 @@
+{
+  "name": "claude-govee-lights-local",
+  "owner": {
+    "name": "DrawF"
+  },
+  "plugins": [
+    {
+      "name": "claude-govee-lights",
+      "source": "./",
+      "description": "Ambient Govee lighting driven by Claude Code activity."
+    }
+  ]
+}

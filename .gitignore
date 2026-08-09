@@ -1,0 +1,19 @@
+# The API GUID is a credential — never commit it.
+Govee-API-GUID.txt
+config/config.local.json
+*.guid
+
+# Govee's own documentation is their copyright, not ours — kept locally for
+# reference, never redistributed. docs/API-NOTES.md records what it says
+# (and the four places it is wrong).
+*.docx
+
+# Build output
+bin/
+obj/
+dist/
+*.user
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,19 @@
+# Normalize to LF in the repository; Git checks out native line endings on Windows.
+* text=auto
+
+# PowerShell is happiest with CRLF in the working tree on Windows.
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+
+# Source and config: LF in the tree, normalized in the repo.
+*.cs      text diff=csharp
+*.csproj  text
+*.config  text
+*.json    text
+*.md      text
+
+# Binary - never touch, never diff.
+*.docx binary
+*.dll  binary
+*.exe  binary
+*.pdb  binary

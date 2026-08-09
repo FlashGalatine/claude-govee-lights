@@ -1,0 +1,83 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/Ensure-Daemon.ps1\"",
+            "async": true,
+            "timeout": 15,
+            "statusMessage": "Starting Govee lights"
+          }
+        ]
+      }
+    ],
+
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=prompt", "timeout": 2 } ] }
+    ],
+
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=pre_tool", "timeout": 2 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=post_tool", "timeout": 2 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=tool_error", "timeout": 2 } ] }
+    ],
+    "PostToolBatch": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=post_batch", "timeout": 2 } ] }
+    ],
+
+    "PermissionRequest": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=permission_request", "timeout": 2 } ] }
+    ],
+    "PermissionDenied": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=permission_denied", "timeout": 2 } ] }
+    ],
+
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=permission_prompt", "timeout": 2 } ]
+      },
+      {
+        "matcher": "idle_prompt",
+        "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=idle", "timeout": 2 } ]
+      }
+    ],
+
+    "Stop": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=stop", "timeout": 2 } ] }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=stop_error", "timeout": 2 } ] }
+    ],
+
+    "SubagentStart": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=subagent_start", "timeout": 2 } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=subagent_stop", "timeout": 2 } ] }
+    ],
+
+    "PreCompact": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=precompact", "timeout": 2 } ] }
+    ],
+    "PostCompact": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=postcompact", "timeout": 2 } ] }
+    ],
+
+    "TeammateIdle": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=idle", "timeout": 2 } ] }
+    ],
+
+    "SessionEnd": [
+      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=session_end", "timeout": 1 } ] }
+    ]
+  }
+}

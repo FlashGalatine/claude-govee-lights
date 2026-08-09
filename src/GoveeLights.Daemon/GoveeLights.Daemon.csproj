@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net48 is mandatory, not a preference: GoveeAPI.dll is a .NET Framework 4.x
+         assembly and its TouchSocket dependency chain will not load on .NET Core. -->
+    <TargetFramework>net48</TargetFramework>
+    <!-- WinExe so the daemon runs with no console window. The "console" switch
+         allocates one on demand for interactive debugging. -->
+    <OutputType>WinExe</OutputType>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>GoveeLightsDaemon</AssemblyName>
+    <RootNamespace>GoveeLights</RootNamespace>
+    <Company>ClaudeGoveeLights</Company>
+    <Product>Claude Govee Lights Daemon</Product>
+    <Version>0.1.0</Version>
+    <Platforms>AnyCPU</Platforms>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- JavaScriptSerializer. Deliberately no NuGet JSON library: GoveeAPI binds
+         Newtonsoft.Json 9.0.0.0 and System.Text.Json 6.0.0.0 from its own folder,
+         and shipping our own copies invites a version fight we cannot win. -->
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+</Project>
