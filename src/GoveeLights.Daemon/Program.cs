@@ -99,15 +99,24 @@ namespace GoveeLights
 
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; _quit.Set(); };
 
-            // Idle shutdown: exit once nothing has happened for a while, so we are not a
-            // permanent background process. SessionStart restarts us instantly.
+            // Idle shutdown, so we are not a permanent background process.
+            //
+            // This is only safe because Ensure-Daemon is wired to UserPromptSubmit as
+            // well as SessionStart. SessionStart alone does not fire again inside an
+            // already-running session, so a daemon that exited mid-session could never
+            // come back and every subsequent hook got connection-refused.
+            var idleEnabled = _cfg.IdleShutdownMinutes > 0;
             var idleLimit = TimeSpan.FromMinutes(Math.Max(1, _cfg.IdleShutdownMinutes));
+            if (!idleEnabled) Log.Info("idle_shutdown_disabled", "will run until stopped");
+
             while (!_quit.IsSet)
             {
                 if (_quit.Wait(5000)) break;
-                if (_sessions.Count == 0 && DateTime.UtcNow - _renderer.LastActivityAt > idleLimit)
+                if (idleEnabled && _sessions.Count == 0 &&
+                    DateTime.UtcNow - _renderer.LastActivityAt > idleLimit)
                 {
-                    Log.Info("idle_shutdown", "no sessions; exiting");
+                    Log.Info("idle_shutdown", "no sessions; exiting",
+                        new Dictionary<string, object> { { "afterMinutes", _cfg.IdleShutdownMinutes } });
                     break;
                 }
             }

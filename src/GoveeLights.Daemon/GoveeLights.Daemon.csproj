@@ -12,7 +12,7 @@
     <RootNamespace>GoveeLights</RootNamespace>
     <Company>ClaudeGoveeLights</Company>
     <Product>Claude Govee Lights Daemon</Product>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Platforms>AnyCPU</Platforms>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>

@@ -133,9 +133,17 @@ namespace GoveeLights
             while (_running)
             {
                 var cfg = _cfg();
-                var tick = Math.Max(10, cfg.Render.TickMs);
                 try { TickOnce(cfg); }
                 catch (Exception ex) { Log.Exception("render_tick_failed", ex); }
+
+                // Nothing is being rendered when Offline, so ticking at animation rate
+                // burns wakeups for no reason. Idling cheaply is what makes it
+                // reasonable to leave the daemon running rather than shutting it down
+                // and hoping something restarts it.
+                var tick = _current == Activity.Offline
+                    ? Math.Max(cfg.Render.TickMs, cfg.Render.IdleTickMs)
+                    : Math.Max(10, cfg.Render.TickMs);
+
                 Thread.Sleep(tick);
             }
         }

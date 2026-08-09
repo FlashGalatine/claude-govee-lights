@@ -25,7 +25,8 @@ namespace GoveeLights
 
     public class RenderConfig
     {
-        public int TickMs { get; set; } = 40;               // 25 fps
+        public int TickMs { get; set; } = 40;               // 25 fps while animating
+        public int IdleTickMs { get; set; } = 250;          // when Offline - nothing to draw
         public int MinDeviceIntervalMs { get; set; } = 40;
         public int MaxCallsPerSecGlobal { get; set; } = 90;
         public int KeepaliveSeconds { get; set; } = 30;
@@ -48,8 +49,16 @@ namespace GoveeLights
             @"C:\Program Files\Govee\Govee Desktop\GoveeAPI\GoveeAPI.dll";
         public int Port { get; set; } = 17321;
         public string LogLevel { get; set; } = "INFO";
-        public int IdleShutdownMinutes { get; set; } = 20;
-        public int SessionTtlMinutes { get; set; } = 30;
+        /// <summary>Exit after this long with no live sessions. 0 disables it.
+        /// Recovery relies on the Ensure-Daemon command hook wired to both SessionStart
+        /// and UserPromptSubmit - SessionStart alone never fires again inside an
+        /// already-running session, which strands the daemon down for good.</summary>
+        public int IdleShutdownMinutes { get; set; } = 120;
+
+        /// <summary>Forget a session after this long with no events. Guards against a
+        /// missed SessionEnd. Long enough that stepping away from an open session does
+        /// not look like a dead one.</summary>
+        public int SessionTtlMinutes { get; set; } = 90;
 
         /// <summary>Docs say 1 = gradient on; the internal field is named _gradientOffSkus,
         /// implying the opposite. Both return 0, so this is exposed for visual tuning.</summary>

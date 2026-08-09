@@ -2,15 +2,51 @@
 
 JSON has no comments, so the reasoning lives here.
 
-## One `command` hook, everything else `http`
+## Two `command` hooks, everything else `http`
 
-`SessionStart` is the only `command` hook. It has to bootstrap the daemon, so it cannot
-assume the daemon already exists. It is `async: true`, and `Ensure-Daemon.ps1` always
-exits 0 — a command hook exiting 2 is a *blocking* error that would surface to the user.
-Ambient lighting is never worth interrupting a session for.
+`Ensure-Daemon.ps1` runs on **`SessionStart` and `UserPromptSubmit`**. Both are
+`async: true`, and the script always exits 0 — a command hook exiting 2 is a *blocking*
+error that would surface to the user. Ambient lighting is never worth interrupting a
+session for.
 
 Every other event is an `http` hook posting to `127.0.0.1:17321`. Measured round trip is
 **1–2 ms**, versus a process spawn per event for the command equivalent.
+
+### Why `UserPromptSubmit` also bootstraps
+
+This looks redundant. It is not, and leaving it out produced a real bug.
+
+The daemon shuts itself down after a long idle period. Originally only `SessionStart`
+could restart it — but **`SessionStart` does not fire again inside an already-running
+session**. So the sequence was:
+
+```
+session_start    tracking session
+session_expired  no events within TTL      (a quiet stretch)
+render_state     Offline
+idle_shutdown    no sessions; exiting
+```
+
+…and from that moment every hook in a still-open session hit a dead port. The user saw
+connection-refused errors that never stopped, because nothing could bring the daemon
+back without starting a brand-new session.
+
+`UserPromptSubmit` is the right recovery point: it fires once per turn, so the cost is
+one backgrounded process per prompt, and it guarantees the daemon is alive before any
+tool events follow. `Ensure-Daemon.ps1` short-circuits on `Get-Process` when the daemon
+is already up, so the common case is nearly free.
+
+**The bootstrap forwards its payload only when it actually had to start the daemon.**
+When the daemon was already running, the parallel `http` hook for that same event is
+already delivering it, and posting again would double up. It also forwards to `/hook`
+with no `?e=` hint so the daemon reads the real `hook_event_name` — an earlier version
+hardcoded `?e=session_start`, which mislabelled a recovered prompt as `Idle` instead of
+`Thinking`.
+
+Session TTL (90 min) and idle shutdown (120 min) are both deliberately longer than a
+plausible coffee break. Set `IdleShutdownMinutes` to `0` to disable shutdown entirely;
+the daemon costs about 0.5% CPU while idle, since the render loop drops to
+`Render.IdleTickMs` when nothing is being drawn.
 
 ## Why a dead daemon is safe
 

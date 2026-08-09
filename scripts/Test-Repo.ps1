@@ -101,6 +101,25 @@ if ($parsed['hooks/hooks.json']) {
         else { No "referenced script missing" $r }
     }
 
+    # Regression guard. The daemon idles out, and only a `command` hook can restart it.
+    # SessionStart alone is NOT enough: it never fires again inside an already-running
+    # session, so a daemon that exited mid-session stayed dead and every subsequent
+    # hook returned connection-refused. UserPromptSubmit is the recovery point.
+    $bootstrapped = @(
+        $parsed['hooks/hooks.json'].hooks.PSObject.Properties |
+        Where-Object {
+            ($_.Value | ConvertTo-Json -Depth 8 -Compress) -match 'Ensure-Daemon\.ps1'
+        } | ForEach-Object { $_.Name }
+    )
+    foreach ($required in @('SessionStart', 'UserPromptSubmit')) {
+        if ($bootstrapped -contains $required) {
+            Ok "$required can restart the daemon"
+        } else {
+            No "$required has no Ensure-Daemon bootstrap" `
+               'Without it a daemon that idles out mid-session can never recover.'
+        }
+    }
+
     # The example config's port must match, or the docs contradict the wiring.
     if ($parsed['config/config.example.json'] -and $ports.Count -eq 1) {
         $cfgPort = $parsed['config/config.example.json'].Port

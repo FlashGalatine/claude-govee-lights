@@ -1,6 +1,6 @@
 {
   "name": "claude-govee-lights",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Drives Govee lights from Claude Code activity - idle, thinking, tool use, waiting on you, errors.",
   "author": {
     "name": "DrawF"

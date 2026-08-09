@@ -17,7 +17,18 @@
     ],
 
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "http", "url": "http://127.0.0.1:17321/hook?e=prompt", "timeout": 2 } ] }
+      {
+        "hooks": [
+          { "type": "http", "url": "http://127.0.0.1:17321/hook?e=prompt", "timeout": 2 },
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/Ensure-Daemon.ps1\"",
+            "async": true,
+            "timeout": 15
+          }
+        ]
+      }
     ],
 
     "PreToolUse": [

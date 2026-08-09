@@ -165,6 +165,21 @@ in the Govee Home mobile app — `/govee devices` shows which devices report it.
 daemon enables automatically. Close Scenic DreamView and Razer DreamView; they fight for
 the same devices.
 
+**Connection refused on every hook.** The daemon is not running. It idles out after
+`IdleShutdownMinutes` (default 120) with no live sessions; submitting a prompt restarts
+it via the `UserPromptSubmit` bootstrap, usually within a second. If it never comes back,
+run `/govee doctor` — most likely the build is missing, or the port is taken by something
+else. Set `IdleShutdownMinutes` to `0` to keep the daemon resident; it costs roughly 0.5%
+CPU while idle.
+
+Check `/govee logs` for the shutdown reason:
+
+```
+idle_shutdown    no sessions; exiting        expected, recoverable on next prompt
+session_expired  no events within TTL        a session went quiet for SessionTtlMinutes
+govee_init_failed                            Govee Desktop is gone or elevated
+```
+
 ## Layout
 
 ```

@@ -6,8 +6,8 @@
   "GoveeDllPath": "C:\\Program Files\\Govee\\Govee Desktop\\GoveeAPI\\GoveeAPI.dll",
   "Port": 17321,
   "LogLevel": "INFO",
-  "IdleShutdownMinutes": 20,
-  "SessionTtlMinutes": 30,
+  "IdleShutdownMinutes": 120,
+  "SessionTtlMinutes": 90,
 
   "_comment_gradient": "Docs say 1 = gradient on; the DLL's internal field is named _gradientOffSkus, implying the opposite. Both return success, so flip this if segment blending looks wrong.",
   "IsGradientOff": 1,
@@ -28,6 +28,7 @@
 
   "Render": {
     "TickMs": 40,
+    "IdleTickMs": 250,
     "MinDeviceIntervalMs": 40,
     "MaxCallsPerSecGlobal": 90,
     "KeepaliveSeconds": 30,

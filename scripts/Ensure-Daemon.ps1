@@ -38,15 +38,20 @@ function Test-Daemon {
 }
 
 function Send-Payload {
+    # No ?e= hint: the daemon reads hook_event_name from the body, which is correct
+    # for every event this bootstrap is wired to. Only Notification and StopFailure
+    # need the hint, and neither is a command hook.
     if (-not $payload) { return }
     try {
-        Invoke-RestMethod -Uri "$base/hook?e=session_start" -Method Post -Body $payload `
+        Invoke-RestMethod -Uri "$base/hook" -Method Post -Body $payload `
             -ContentType 'application/json' -TimeoutSec 3 -ErrorAction Stop | Out-Null
     } catch { }
 }
 
 try {
-    if (Test-Daemon) { Send-Payload; exit 0 }
+    # Already up: the parallel http hook for this same event is delivering the
+    # payload, so forwarding here would double-post. Just confirm and leave.
+    if (Test-Daemon) { exit 0 }
 
     # Locate the executable: published output first, then a dev build.
     $root = if ($env:CLAUDE_PLUGIN_ROOT) { $env:CLAUDE_PLUGIN_ROOT } else { Split-Path $PSScriptRoot -Parent }
