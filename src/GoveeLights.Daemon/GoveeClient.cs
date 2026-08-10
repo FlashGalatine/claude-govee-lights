@@ -70,9 +70,22 @@ namespace GoveeLights
         DateTime _nextRetry = DateTime.MinValue;
         int _retryStep;
 
+        // Roster retry. Govee Desktop answers the pipe before it has finished discovering
+        // devices on the LAN, so the first roster after a cold start can come back with
+        // every device reporting IsLANOn:0. See LoadDevices.
+        readonly object _devRetryGate = new object();
+        Timer _devRetryTimer;
+        int _devRetryStep;
+        string _rosterSig;
+
         public bool Connected => _connected;
         public string LastError { get; private set; }
         public IReadOnlyList<GoveeDevice> Devices { get; private set; } = new List<GoveeDevice>();
+
+        /// <summary>Raised on the worker thread after the roster is (re)loaded. Program
+        /// wires this to Renderer.SyncDevices so a late roster is actually picked up -
+        /// without it, a retry would update Devices and change nothing observable.</summary>
+        public Action DevicesLoaded;
 
         public GoveeClient(string dllPath, string guid)
         {
@@ -201,6 +214,7 @@ namespace GoveeLights
             {
                 _connected = true;
                 _retryStep = 0;
+                _devRetryStep = 0;   // a fresh connection gets a fresh roster budget
                 LastError = null;
                 Log.Info("govee_connected", "InitConnect succeeded", new Dictionary<string, object> { { "ms", sw.ElapsedMilliseconds } });
                 LoadDevices();
@@ -274,9 +288,70 @@ namespace GoveeLights
                         { "count", list.Count },
                         { "lan", string.Join(",", list.Where(d => d.LanOn).Select(d => d.Name + "[" + d.SegmentNums + "]")) }
                     });
+
+                    // Devices present but none drivable. On a cold start this means Govee
+                    // Desktop answered before finishing LAN discovery - not that the user
+                    // turned LAN Control off on every device. Re-read instead of trusting
+                    // it: the DeviceNotFound/DeviceOffline reload in Call() cannot rescue
+                    // this state, because an empty roster means we never issue a control
+                    // call to fail in the first place.
+                    if (list.Count > 0 && !list.Any(d => d.LanOn)) ScheduleDeviceRetry();
+                    else CancelDeviceRetry();
+
+                    // Only notify on a real change. The DeviceNotFound/DeviceOffline reload
+                    // in Call() fires once per failing device, so an unguarded callback would
+                    // rebuild the render roster N times for one burst of offline devices.
+                    var sig = string.Join(";", list.Select(d => d.Name + "|" + (d.LanOn ? 1 : 0) + "|" + d.SegmentNums));
+                    if (sig != _rosterSig)
+                    {
+                        _rosterSig = sig;
+                        var cb = DevicesLoaded;
+                        if (cb != null)
+                        {
+                            try { cb(); }
+                            catch (Exception ex) { Log.Exception("devices_loaded_cb_failed", ex); }
+                        }
+                    }
                 }
             }
             catch (Exception ex) { Log.Exception("govee_devices_failed", ex); }
+        }
+
+        /// <summary>Re-read the roster after a delay, with a bounded backoff. Called only
+        /// from the worker thread, so _devRetryStep needs no lock; the timer field does,
+        /// against Dispose racing a pending callback.</summary>
+        void ScheduleDeviceRetry()
+        {
+            int[] steps = { 10, 30, 60 };
+
+            if (_devRetryStep >= steps.Length)
+            {
+                Log.Warn("govee_devices_no_lan",
+                    "still no LAN-capable devices after retries; enable LAN Control per device in the Govee Home mobile app, then run /govee refresh");
+                return;
+            }
+
+            var secs = steps[_devRetryStep++];
+            Log.Warn("govee_devices_no_lan", "roster has no LAN-capable devices; Govee Desktop may still be starting",
+                new Dictionary<string, object> { { "attempt", _devRetryStep }, { "retryInSec", secs } });
+
+            lock (_devRetryGate)
+            {
+                if (_disposed) return;
+                if (_devRetryTimer == null)
+                    _devRetryTimer = new Timer(_ => Post(LoadDevices), null, secs * 1000, Timeout.Infinite);
+                else
+                    _devRetryTimer.Change(secs * 1000, Timeout.Infinite);
+            }
+        }
+
+        void CancelDeviceRetry()
+        {
+            _devRetryStep = 0;
+            lock (_devRetryGate)
+            {
+                if (_devRetryTimer != null) _devRetryTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            }
         }
 
         GoveeCode Call(MethodInfo m, string label, string device, object[] args)
@@ -365,6 +440,14 @@ namespace GoveeLights
         public void Dispose()
         {
             _disposed = true;
+            lock (_devRetryGate)
+            {
+                if (_devRetryTimer != null)
+                {
+                    try { _devRetryTimer.Dispose(); } catch { }
+                    _devRetryTimer = null;
+                }
+            }
             try { _queue.CompleteAdding(); } catch { }
             try { _worker.Join(1500); } catch { }
         }

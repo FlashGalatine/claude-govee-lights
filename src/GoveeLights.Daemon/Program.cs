@@ -75,6 +75,10 @@ namespace GoveeLights
             _govee = new GoveeClient(_cfg.GoveeDllPath, _cfg.ApiGuid);
             _renderer = new Renderer(_govee, _sessions, Cfg);
 
+            // A roster reloaded later (retry after a cold-start race, or /refresh) is
+            // useless unless the render roster is rebuilt from it.
+            _govee.DevicesLoaded = () => _renderer.SyncDevices();
+
             // Bind before anything else observable: a second instance must lose here.
             _http = new MiniHttpServer(_cfg.Port, Handle);
             string httpErr;
