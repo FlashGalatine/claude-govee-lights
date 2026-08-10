@@ -260,6 +260,38 @@ Two devices share `SkuType` `H6066` but differ by `Name`, confirming `Name` is t
 **Segment counts must come from this call, not from `device_info.ini`**, which reports a flat
 `10` for everything. The truth is `Glide Hexa Pro Desk` = 4 and `Glide Hexa Pro` = 16.
 
+### Cold start: `IsLANOn` lies until Desktop finishes LAN discovery
+
+`InitConnect` succeeding does **not** mean the roster is usable. Govee Desktop answers the pipe
+well before it has finished discovering devices on the LAN, and during that window
+`GetDeviceBaseInfo()` returns the full device list with `IsLANOn:0` on **every** entry —
+wire-indistinguishable from the user having genuinely turned LAN Control off everywhere.
+
+Measured on a reproduced cold start (2026-08-09):
+
+```
+23:47:54  Govee Desktop launched
+23:47:58  daemon started (3 s later)
+23:48:03  InitConnect succeeded after 5032 ms  ->  6 devices, 0 LAN-capable
+23:48:13  re-read                              ->  6 devices, 0 LAN-capable
+23:48:43  re-read                              ->  6 devices, 3 LAN-capable
+```
+
+**~48 s from Desktop launch to a truthful `IsLANOn`.** The first `InitConnect` of a cold start
+also hangs ~5 s and fails with code `100` before a retry succeeds — a useful tell that Desktop
+is still starting rather than that anything is wrong.
+
+Consequences:
+
+- Never treat the first roster of a session as authoritative. "Devices present, none
+  LAN-capable" means *not ready yet*, not *nothing to drive*. `GoveeClient.ScheduleDeviceRetry`
+  re-reads on a 10 s / 30 s / 60 s backoff, which covers the observed window with margin.
+- A fixed startup delay is the wrong fix. 48 s is one machine on one boot; cold disk, network
+  conditions and device count all move it, so the daemon polls until the data looks sane
+  instead of waiting a guessed constant.
+- This failure is **silent**. Nothing errors: the roster parses, the count is right, and the
+  renderer correctly drives the zero devices it was handed.
+
 ### Latency
 
 Control calls are fire-and-forget UDP sends, not round trips, so they are extremely cheap:

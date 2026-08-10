@@ -190,6 +190,44 @@ if (-not $SkipBuildOutput) {
     else { Write-Host '  SKIP  no build output found (run scripts\Build.ps1)' -ForegroundColor DarkGray }
 }
 
+# ------------------------------------------------- cold-start roster recovery
+Section 'Cold-start roster recovery'
+# Govee Desktop reports every device as IsLANOn:0 for ~48s after launch (docs/API-NOTES.md),
+# so a daemon started alongside it reads an empty roster. Both halves of the recovery fail
+# SILENTLY when removed - nothing errors, the lights just never come on until someone runs
+# /govee refresh:
+#   * without the retry, that first empty roster is cached for the life of the process;
+#   * without the callback, a retry updates Devices and rebuilds nothing observable.
+$clientCs = Join-Path $root 'src/GoveeLights.Daemon/GoveeClient.cs'
+$programCs = Join-Path $root 'src/GoveeLights.Daemon/Program.cs'
+
+if (Test-Path $clientCs) {
+    $cs = Get-Content $clientCs -Raw
+    if ($cs -match 'ScheduleDeviceRetry') {
+        Ok 'GoveeClient re-reads a roster with no LAN-capable devices'
+    } else {
+        No 'GoveeClient has no roster retry' `
+           'A cold-start roster of all-IsLANOn:0 would be cached until the daemon restarts.'
+    }
+
+    if ($cs -match 'DevicesLoaded') {
+        Ok 'GoveeClient exposes a DevicesLoaded callback'
+    } else {
+        No 'GoveeClient has no DevicesLoaded callback' `
+           'A late roster would have no way to reach the renderer.'
+    }
+} else { No 'GoveeClient.cs exists' $clientCs }
+
+if (Test-Path $programCs) {
+    $ps = Get-Content $programCs -Raw
+    if ($ps -match 'DevicesLoaded[^\r\n]*SyncDevices') {
+        Ok 'Program wires DevicesLoaded to Renderer.SyncDevices'
+    } else {
+        No 'Program does not wire DevicesLoaded to the renderer' `
+           'Retries would refresh Devices and change nothing the lights can show.'
+    }
+} else { No 'Program.cs exists' $programCs }
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
