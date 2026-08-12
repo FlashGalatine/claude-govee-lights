@@ -276,11 +276,15 @@ if (-not $exe) {
             if ($rows.Count -lt 1) { $bad = $true; break }
             foreach ($r in $rows) {
                 $cells = $r.Split(',')[1..($r.Split(',').Count - 1)]
-                # Whole-device effects (solid/breathe/pulse/blink) render one Solid cell
-                # regardless of segment count - Effects.Whole() deliberately skips the
-                # segment array because DeviceColorControl is cheaper for uniform colour.
-                # Only chase/comet, which paint per segment, must match $n exactly.
-                if ($cells.Count -ne $n -and $cells.Count -ne 1) { $bad = $true; break }
+                # chase and comet paint per segment; the rest render one whole-device cell via
+                # Effects.Whole(), which deliberately skips the segment array because
+                # DeviceColorControl is cheaper for uniform colour. Spatial effects fall back to
+                # breathe at one segment, so they collapse to a single cell there too.
+                # Task 4 adds wipe, progress, sparkle and rainbow - wipe/progress/rainbow are
+                # spatial and sparkle paints per segment too, so extend $spatial then.
+                $spatial = @('chase','comet')
+                $wantCells = if (($spatial -contains $e) -and $n -gt 1) { $n } else { 1 }
+                if ($cells.Count -ne $wantCells) { $bad = $true; break }
                 foreach ($c in $cells) { if ($c -notmatch '^#[0-9A-F]{6}$') { $bad = $true; break } }
             }
         }
