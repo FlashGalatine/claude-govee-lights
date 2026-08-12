@@ -836,35 +836,36 @@ namespace GoveeLights
 
         // ---- shapes -----------------------------------------------------------------
 
+        /// <summary>Returns one weight per segment - or a single weight when the effect is
+        /// uniform across the device. That length-1 case is load-bearing: it is what makes
+        /// ToFrame emit a whole-device colour instead of a segment array, and what makes
+        /// direction a no-op for effects that have no direction.</summary>
         static double[] Shape(string effect, double t, double tInState, int n, ResolvedStyle s)
         {
-            var w = new double[n];
             switch (effect)
             {
                 case "breathe":
                 {
                     var k = (Math.Sin(t * 2 * Math.PI * s.Hz) + 1) / 2;
-                    for (int i = 0; i < n; i++) w[i] = k;
-                    return w;
+                    return new[] { k };
                 }
 
                 case "pulse":
                 {
                     // Raw sine; the cubic that makes it snap is the default easing.
                     var k = (Math.Sin(t * 2 * Math.PI * s.Hz) + 1) / 2;
-                    for (int i = 0; i < n; i++) w[i] = k;
-                    return w;
+                    return new[] { k };
                 }
 
                 case "blink":
                 {
                     var on = ((int)Math.Floor(t * s.Hz * 2)) % 2 == 0 ? 1.0 : 0.0;
-                    for (int i = 0; i < n; i++) w[i] = on;
-                    return w;
+                    return new[] { on };
                 }
 
                 case "chase":
                 {
+                    var w = new double[n];
                     var head = (t * s.Hz * n) % n;
                     for (int i = 0; i < n; i++)
                     {
@@ -878,6 +879,7 @@ namespace GoveeLights
 
                 case "comet":
                 {
+                    var w = new double[n];
                     var head = (t * s.Hz * n) % n;
                     for (int i = 0; i < n; i++)
                     {
@@ -890,10 +892,7 @@ namespace GoveeLights
                 }
 
                 default: // "solid"
-                {
-                    for (int i = 0; i < n; i++) w[i] = 1.0;
-                    return w;
-                }
+                    return new[] { 1.0 };
             }
         }
 
@@ -952,8 +951,10 @@ namespace GoveeLights
         static Frame ToFrame(double[] w, ResolvedStyle s, int n)
         {
             // Uniform colour is cheaper and more reliable through DeviceColorControl than
-            // through a segment array, so do not fill segments unnecessarily.
-            if (n <= 1) return new Frame { Solid = Mix(s, w[0]), Segments = null };
+            // through a segment array, so do not fill segments unnecessarily. A length-1
+            // weight array is exactly the old Whole() path: keep it byte-identical or the
+            // goldens - and the wire traffic - both change.
+            if (w.Length <= 1) return new Frame { Solid = Mix(s, w[0]), Segments = null };
 
             var cells = new Rgb[n];
             for (int i = 0; i < n; i++) cells[i] = Mix(s, w[i]);
@@ -1095,6 +1096,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                 case "wipe":
                 {
                     // One cycle fills the strip, the next clears it from the same end.
+                    var w = new double[n];
                     var cycle = (t * s.Hz) - Math.Floor(t * s.Hz);
                     var pos = cycle * 2 * n;
                     for (int i = 0; i < n; i++)
@@ -1109,6 +1111,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                 {
                     // Fills by elapsed time in the state, then holds full. The partial
                     // leading cell keeps it from stepping a whole segment at a time.
+                    var w = new double[n];
                     var frac = tInState / s.FullSeconds;
                     if (frac < 0) frac = 0;
                     if (frac > 1) frac = 1;
@@ -1126,6 +1129,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                     // Hashed, not random: Hz becomes a twinkle rate instead of a 25fps
                     // strobe, the segment CSV only changes when the step advances so the
                     // rate limiter is not fighting it, and the output stays reproducible.
+                    var w = new double[n];
                     var step = (long)Math.Floor(t * s.Hz);
                     for (int i = 0; i < n; i++) w[i] = Hash01(i, step) < 0.28 ? 1.0 : 0.0;
                     return w;
@@ -1193,6 +1197,17 @@ to
 ```
 
 and change the golden loop's `foreach ($e in $effects)` to `foreach ($e in $golden)` — only the six original effects have goldens.
+
+Also extend the per-segment list used by the render sweep's cell-count assertion, so the
+four new effects are checked for the right shape rather than waved through:
+
+```powershell
+    $spatial = @('chase','comet','wipe','progress','sparkle','rainbow')
+```
+
+Note this list is "paints per segment", which is deliberately **not** the same as
+`Effects.IsSpatial`: `sparkle` paints per segment but is not in `IsSpatial`, because at one
+segment it reads fine as a random blink and needs no `breathe` fallback.
 
 Then append these checks:
 
