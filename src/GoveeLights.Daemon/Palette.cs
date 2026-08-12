@@ -72,9 +72,35 @@ namespace GoveeLights
             }
         }
 
+        /// <summary>Effects that paint across segments rather than the whole device at
+        /// once. Single source of truth for the segment-count fallback in ResolveStyleFor
+        /// and for the pingpong fold gate in Effects.Render.</summary>
+        public static bool IsSpatial(string effect)
+        {
+            switch (effect)
+            {
+                case "chase": case "comet": case "wipe": case "progress": return true;
+                default: return false;
+            }
+        }
+
         /// <summary>Layers, weakest first: effect defaults, state defaults, config, device.
         /// A non-null field in a later layer wins; null means inherit.</summary>
         public static ResolvedStyle Resolve(DaemonConfig cfg, DeviceConfig device, Activity state)
+        {
+            return ResolveStyle(BuildLayers(cfg, device, state));
+        }
+
+        /// <summary>Segment-aware resolve. A spatial effect has nothing to paint on a
+        /// device with one zone, so on segments &lt;= 1 it re-resolves with Effect forced
+        /// to "breathe" - which lets breathe's own EffectDefaults layer (Depth 0.35) apply,
+        /// instead of Effects re-deriving that floor for a fallback it never asked for.</summary>
+        public static ResolvedStyle ResolveFor(DaemonConfig cfg, DeviceConfig device, Activity state, int segments)
+        {
+            return ResolveStyleFor(segments, BuildLayers(cfg, device, state));
+        }
+
+        static StateStyle[] BuildLayers(DaemonConfig cfg, DeviceConfig device, Activity state)
         {
             var key = state.ToString();
             var layers = new List<StateStyle>(3);
@@ -88,7 +114,7 @@ namespace GoveeLights
             if (device != null && device.States != null && device.States.TryGetValue(key, out s) && s != null)
                 layers.Add(s);
 
-            return ResolveStyle(layers.ToArray());
+            return layers.ToArray();
         }
 
         public static ResolvedStyle ResolveStyle(params StateStyle[] layers)
@@ -130,6 +156,22 @@ namespace GoveeLights
             if (r.FullSeconds <= 0) r.FullSeconds = 30.0;
 
             return r;
+        }
+
+        /// <summary>Same as ResolveStyle, but falls back to breathe when the resolved
+        /// effect is spatial and there is no strip to be spatial on - see ResolveFor.
+        /// The forced layer is appended, not substituted, so it re-enters EffectDefaults
+        /// as the effect key and still layers over everything the caller passed in.</summary>
+        public static ResolvedStyle ResolveStyleFor(int segments, params StateStyle[] layers)
+        {
+            var r = ResolveStyle(layers);
+            if (segments > 1 || !IsSpatial(r.Effect)) return r;
+
+            var n = layers == null ? 0 : layers.Length;
+            var forced = new StateStyle[n + 1];
+            if (layers != null) Array.Copy(layers, forced, n);
+            forced[n] = new StateStyle { Effect = "breathe" };
+            return ResolveStyle(forced);
         }
 
         static string Pick(StateStyle[] layers, Func<StateStyle, string> f)

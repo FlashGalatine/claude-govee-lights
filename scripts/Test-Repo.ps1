@@ -330,39 +330,102 @@ if (-not $exe) {
     if (($b | Where-Object { $_ -match '^#' }) -match 'depth=0\.35') { Ok 'breathe inherits its 0.35 depth floor' }
     else { No 'breathe did not inherit its depth floor' (($b | Where-Object { $_ -match '^#' })) }
 
-    # Direction is an array transform, so reverse must be an exact mirror of forward.
+    # Direction is an array transform, so reverse must be an exact mirror of forward. A
+    # field-count guard and a genuine-difference check keep this from passing vacuously
+    # if frames ever collapsed to a single colour column (the Finding-1 bug class: that
+    # collapse would make forward and reverse trivially identical single-cell rows).
     $fwd = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"forward"}','--segments','10','--seconds','1')
     $rev = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"reverse"}','--segments','10','--seconds','1')
     $mirrorOk = $true
+    $sawFullWidth = $true
+    $sawDifference = $false
     $fwdRows = @($fwd | Where-Object { $_ -notmatch '^#' -and $_ })
     $revRows = @($rev | Where-Object { $_ -notmatch '^#' -and $_ })
     if ($fwdRows.Count -ne $revRows.Count -or $fwdRows.Count -eq 0) { $mirrorOk = $false }
     else {
         for ($i = 0; $i -lt $fwdRows.Count; $i++) {
             $f = $fwdRows[$i].Split(','); $r = $revRows[$i].Split(',')
+            if ($f.Count -le 2 -or $r.Count -le 2) { $sawFullWidth = $false; break }
             $fc = $f[1..($f.Count-1)]; $rc = $r[1..($r.Count-1)]
+            if (($fc -join ',') -ne ($rc -join ',')) { $sawDifference = $true }
             [array]::Reverse($rc)
             if (($fc -join '') -ne ($rc -join '')) { $mirrorOk = $false; break }
         }
     }
-    if ($mirrorOk) { Ok 'Direction reverse is the exact mirror of forward' }
+    if (-not $sawFullWidth) { No 'reverse test rows collapsed to fewer than 10 cells' }
+    elseif (-not $sawDifference) { No 'forward and reverse never differed' 'A collapsed frame would pass vacuously.' }
+    elseif ($mirrorOk) { Ok 'Direction reverse is the exact mirror of forward' }
     else { No 'reverse is not a mirror of forward' }
 
-    # Depth must floor the output: nothing may fall below depth * colour.
+    # Depth must floor the output at depth * colour, and must not also cap the ceiling -
+    # asserting only the minimum would pass for a shape stuck flat at 0.5.
     $d = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Depth":0.5}','--segments','1','--seconds','2')
     $dv = @($d | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
         [Convert]::ToInt32($_.Split(',')[1].Substring(1,2), 16) })
     $dmin = ($dv | Measure-Object -Minimum).Minimum
-    if ($dmin -ge 126 -and $dmin -le 129) { Ok 'Depth floors the output' "min channel $dmin" }
-    else { No 'Depth floor not applied' "min channel $dmin, expected 128" }
+    $dmax = ($dv | Measure-Object -Maximum).Maximum
+    if ($dmin -ge 126 -and $dmin -le 129 -and $dmax -ge 253) {
+        Ok 'Depth floors the output' "min channel $dmin, max channel $dmax"
+    } else { No 'Depth floor not applied' "min channel $dmin (want ~128), max channel $dmax (want ~255)" }
 
     # Color2 replaces "scale toward black" with a blend between two colours, so the
-    # dimmest frame should be Color2 rather than near-black. Depth is pinned to 0: blink
-    # defaults to Depth 0.06, which would lift the low end off Color2 exactly.
+    # dimmest frame should be Color2 rather than near-black, and the brightest should
+    # still be Color - asserting only the low end would pass for a Mix that always
+    # returned Color2. Depth is pinned to 0: blink defaults to Depth 0.06, which would
+    # lift the low end off Color2 exactly.
     $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000","Depth":0}','--segments','1','--seconds','2')
     $c2rows = @($c2 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object { $_.Split(',')[1] })
-    if (($c2rows | Sort-Object -Unique) -contains '#FF0000') { Ok 'Color2 is used as the low end of the blend' }
-    else { No 'Color2 was not blended' ($c2rows | Sort-Object -Unique) -join ' ' }
+    $c2u = $c2rows | Sort-Object -Unique
+    if (($c2u -contains '#FF0000') -and ($c2u -contains '#FFFFFF')) { Ok 'Color2 is used as the low end of the blend' }
+    else { No 'Color2 was not blended' ($c2u -join ' ') }
+
+    # Pingpong must fold time into a genuine bounce, not mirror a circularly wrapping
+    # head (Finding 2). A raw "brightest segment index" comparison cannot tell a real
+    # bounce from CircularDistance's ordinary once-per-lap ring seam: chase already
+    # aliases index (n-1) to index 0 there once a head every lap - forward chase does
+    # this too, harmlessly - so an index-jump threshold flags that normal seam crossing
+    # exactly as loudly as the bug and cannot tell them apart (confirmed by hand: both
+    # the pre-fix and the fixed build show the same raw index jump at the seam).
+    #
+    # What actually distinguishes a bounce is symmetry: folding time makes tShape retrace
+    # itself around the turnaround, so the rendered frames on either side of it must be an
+    # exact mirror image of each other - not just "no big jump". Hz is chosen so 1/Hz is a
+    # whole number of frames (2 seconds at 25 fps = frame 50), landing the turnaround
+    # exactly on a sample instead of between two of them.
+    $pp = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.5,"Color":"#3366CC","Direction":"pingpong"}','--segments','10','--seconds','4','--fps','25')
+    $ppRows = @($pp | Where-Object { $_ -notmatch '^#' -and $_ })
+    $mid = 50
+    $ppOk = $ppRows.Count -ge ($mid * 2)
+    if ($ppOk) {
+        for ($k = 1; $k -lt $mid; $k++) {
+            $before = ($ppRows[$mid - $k] -split ',', 2)[1]
+            $after  = ($ppRows[$mid + $k] -split ',', 2)[1]
+            if ($before -ne $after) { $ppOk = $false; break }
+        }
+    }
+    if ($ppOk) { Ok 'Pingpong is a true mirror image around its turnaround' }
+    else { No 'Pingpong does not bounce cleanly at the turnaround' }
+
+    # Easing with no golden coverage: sine and expo must each actually change pulse's
+    # output relative to linear for the same effect and Hz.
+    $easeLinear = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"linear"}','--segments','1','--seconds','1')) -notmatch '^#'
+    $easeSine   = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"sine"}','--segments','1','--seconds','1'))   -notmatch '^#'
+    $easeExpo   = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"expo"}','--segments','1','--seconds','1'))   -notmatch '^#'
+    if ((($easeSine -join "`n") -ne ($easeLinear -join "`n")) -and (($easeExpo -join "`n") -ne ($easeLinear -join "`n"))) {
+        Ok 'sine and expo easing change pulse output'
+    } else { No 'easing had no effect on rendered output' }
+
+    # Tail with no golden coverage: a wider Tail must widen comet's falloff, lighting
+    # more segments above a brightness threshold in the same (deterministic, t=0) frame.
+    $tailNarrow = Invoke-Dump @('--style','{"Effect":"comet","Hz":0.6,"Color":"#FFFFFF","Tail":1.0}','--segments','20','--seconds','0.1')
+    $tailWide   = Invoke-Dump @('--style','{"Effect":"comet","Hz":0.6,"Color":"#FFFFFF","Tail":2.5}','--segments','20','--seconds','0.1')
+    $narrowRow = @($tailNarrow | Where-Object { $_ -notmatch '^#' -and $_ } | Select-Object -First 1)[0]
+    $wideRow   = @($tailWide   | Where-Object { $_ -notmatch '^#' -and $_ } | Select-Object -First 1)[0]
+    $narrowAbove = @($narrowRow.Split(',')[1..20] | ForEach-Object { [Convert]::ToInt32($_.Substring(1,2), 16) } | Where-Object { $_ -ge 150 }).Count
+    $wideAbove   = @($wideRow.Split(',')[1..20]   | ForEach-Object { [Convert]::ToInt32($_.Substring(1,2), 16) } | Where-Object { $_ -ge 150 }).Count
+    if ($wideAbove -gt $narrowAbove) {
+        Ok 'Tail widens the comet falloff' "tail=1.0 -> $narrowAbove segments, tail=2.5 -> $wideAbove segments"
+    } else { No 'Tail had no effect on comet falloff' "tail=1.0 -> $narrowAbove, tail=2.5 -> $wideAbove" }
 }
 
 # --------------------------------------------------------------- housekeeping

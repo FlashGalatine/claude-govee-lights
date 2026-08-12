@@ -17,6 +17,11 @@ namespace GoveeLights
     /// modifiers. Shared stages then apply direction, easing, depth and colour in that
     /// fixed order. Writing modifiers once is what keeps eleven effects from disagreeing
     /// about what "reverse" means.
+    ///
+    /// Spatial effects on a single-zone device are handled upstream, at resolve time
+    /// (Palette.ResolveFor/ResolveStyleFor): the resolved style itself is switched to
+    /// breathe there, so breathe's own EffectDefaults layer (Depth 0.35) applies. Render
+    /// therefore just renders whatever effect the style says - it never rewrites it.
     /// </summary>
     public static class Effects
     {
@@ -24,24 +29,33 @@ namespace GoveeLights
         {
             var n = segments < 1 ? 1 : segments;
 
-            // Spatial effects have nothing to say on a single-zone device.
-            var effect = s.Effect;
-            if (n <= 1 && IsSpatial(effect)) effect = "breathe";
+            // Pingpong cannot be an array mirror for spatial effects: mirroring flips
+            // which end the head appears at, but the circular head position keeps
+            // advancing underneath, so at each lap boundary the head would teleport
+            // across the strip instead of turning around. Folding time into a triangle
+            // wave makes the head genuinely sweep up and back before Shape ever sees it.
+            // Non-spatial effects and single zones have no direction to bounce, so the
+            // gate leaves them running on unfolded time.
+            var tShape = (s.Direction == "pingpong" && n > 1 && Palette.IsSpatial(s.Effect))
+                ? FoldTime(t, s.Hz) : t;
 
-            var w = Shape(effect, t, tInState, n, s);
-            w = ApplyDirection(w, s, t);
+            var w = Shape(s.Effect, tShape, tInState, n, s);
+            w = ApplyDirection(w, s);
             ApplyEasing(w, s.Easing);
             ApplyDepth(w, s.Depth);
-            return ToFrame(w, s, n);
+            return ToFrame(w, s);
         }
 
-        static bool IsSpatial(string effect)
+        /// <summary>Maps time onto a 0..1 triangle wave with the same period as one lap,
+        /// so a shape driven by the folded time sweeps forward then genuinely reverses
+        /// instead of wrapping circularly and being mirrored on top of that.</summary>
+        static double FoldTime(double t, double hz)
         {
-            switch (effect)
-            {
-                case "chase": case "comet": case "wipe": case "progress": return true;
-                default: return false;
-            }
+            if (hz <= 0) return t;
+            var u = (t * hz) % 2.0;              // two laps per fold cycle
+            var tri = u <= 1.0 ? u : 2.0 - u;    // 0 -> 1 -> 0
+            if (tri >= 1.0) tri = 1.0 - 1e-9;    // head == n would wrap back to 0 for one frame
+            return tri / hz;
         }
 
         // ---- shapes -----------------------------------------------------------------
@@ -115,29 +129,24 @@ namespace GoveeLights
         // ---- stages -----------------------------------------------------------------
 
         /// <summary>Reverse mirrors the array, which turns a travelling wave around and
-        /// flips a fill. Pingpong mirrors on odd cycles only, so motion bounces instead
-        /// of wrapping. Both are no-ops on a single zone.</summary>
-        static double[] ApplyDirection(double[] w, ResolvedStyle s, double t)
+        /// flips a fill. Pingpong is handled earlier, as a time fold before the shape is
+        /// computed (see FoldTime) - mirroring the array cannot make a circularly
+        /// wrapping head bounce. A no-op on a single zone.</summary>
+        static double[] ApplyDirection(double[] w, ResolvedStyle s)
         {
             if (w.Length <= 1) return w;
-
-            bool mirror;
-            switch (s.Direction)
-            {
-                case "reverse":  mirror = true; break;
-                case "pingpong": mirror = ((int)Math.Floor(t * s.Hz)) % 2 != 0; break;
-                default:         mirror = false; break;
-            }
-            if (!mirror) return w;
+            if (s.Direction != "reverse") return w;
 
             var o = new double[w.Length];
             for (int i = 0; i < w.Length; i++) o[i] = w[w.Length - 1 - i];
             return o;
         }
 
+        /// <summary>Clamps to 0..1 unconditionally, even under "linear", so "weights are
+        /// in 0..1" stays true for every effect - including future shapes that Shape does
+        /// not itself clamp.</summary>
         static void ApplyEasing(double[] w, string easing)
         {
-            if (easing == "linear") return;
             for (int i = 0; i < w.Length; i++)
             {
                 var x = w[i] < 0 ? 0 : (w[i] > 1 ? 1 : w[i]);
@@ -158,7 +167,7 @@ namespace GoveeLights
             for (int i = 0; i < w.Length; i++) w[i] = depth + (1 - depth) * w[i];
         }
 
-        static Frame ToFrame(double[] w, ResolvedStyle s, int n)
+        static Frame ToFrame(double[] w, ResolvedStyle s)
         {
             // Uniform colour is cheaper and more reliable through DeviceColorControl than
             // through a segment array, so do not fill segments unnecessarily. A length-1
@@ -166,8 +175,11 @@ namespace GoveeLights
             // goldens - and the wire traffic - both change.
             if (w.Length <= 1) return new Frame { Solid = Mix(s, w[0]), Segments = null };
 
-            var cells = new Rgb[n];
-            for (int i = 0; i < n; i++) cells[i] = Mix(s, w[i]);
+            // Size and iterate on w.Length, not the segment count passed into Render: a
+            // shape returning a different-length array (a bug, but a latent one before
+            // Task 4 adds four more shapes to this dispatch) must not throw here.
+            var cells = new Rgb[w.Length];
+            for (int i = 0; i < w.Length; i++) cells[i] = Mix(s, w[i]);
             return new Frame { Solid = s.Color, Segments = cells };
         }
 

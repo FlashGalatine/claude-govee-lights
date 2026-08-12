@@ -33,7 +33,7 @@ namespace GoveeLights
                 try { raw = new JavaScriptSerializer().Deserialize<StateStyle>(styleJson); }
                 catch (Exception ex) { Console.Error.WriteLine("bad --style: " + ex.Message); return 2; }
                 if (raw == null) { Console.Error.WriteLine("bad --style: null"); return 2; }
-                style = Palette.ResolveStyle(raw);
+                style = Palette.ResolveStyleFor(segments, raw);
             }
             else
             {
@@ -55,7 +55,7 @@ namespace GoveeLights
                 var deviceName = Arg(args, "--device", null);
                 if (cfg != null && !string.IsNullOrEmpty(deviceName))
                     dev = cfg.Devices.FirstOrDefault(x => string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
-                style = Palette.Resolve(cfg, dev, a);
+                style = Palette.ResolveFor(cfg, dev, a, segments);
             }
 
             var w = Console.Out;

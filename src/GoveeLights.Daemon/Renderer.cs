@@ -179,19 +179,8 @@ namespace GoveeLights
 
             if (_current == Activity.Offline) return;
 
-            var style = Palette.Resolve(cfg, null, _current);
-
             // Cross-fade so state changes read as smooth rather than as a jump cut.
             var sinceTransition = (DateTime.UtcNow - _transitionStart).TotalMilliseconds;
-            if (cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs)
-            {
-                var prev = Palette.Resolve(cfg, null, _previous);
-                var mix = sinceTransition / cfg.Render.TransitionMs;
-                style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
-                if (style.HasColor2 && prev.HasColor2)
-                    style.Color2 = Rgb.Lerp(prev.Color2, style.Color2, mix);
-            }
-
             var t = _clock.Elapsed.TotalSeconds;
             var tInState = (DateTime.UtcNow - _transitionStart).TotalSeconds;
 
@@ -201,6 +190,22 @@ namespace GoveeLights
             foreach (var d in snapshot)
             {
                 var segs = d.Cfg.Animate ? d.Segments : 1;
+
+                // Resolved per device, not once for the tick: a spatial effect (chase,
+                // comet, ...) falls back to breathe when a device has no strip to be
+                // spatial on, and that fallback depends on this device's own segment
+                // count (Palette.ResolveFor).
+                var style = Palette.ResolveFor(cfg, null, _current, segs);
+
+                if (cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs)
+                {
+                    var prev = Palette.ResolveFor(cfg, null, _previous, segs);
+                    var mix = sinceTransition / cfg.Render.TransitionMs;
+                    style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
+                    if (style.HasColor2 && prev.HasColor2)
+                        style.Color2 = Rgb.Lerp(prev.Color2, style.Color2, mix);
+                }
+
                 var frame = Effects.Render(style, t, tInState, segs);
                 Emit(cfg, d, style, frame);
             }
