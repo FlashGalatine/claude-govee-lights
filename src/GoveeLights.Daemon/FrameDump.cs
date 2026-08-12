@@ -58,6 +58,19 @@ namespace GoveeLights
                 style = Palette.ResolveFor(cfg, dev, a, segments);
             }
 
+            ResolvedStyle fromStyle = null;
+            var fromName = Arg(args, "--from", null);
+            if (!string.IsNullOrEmpty(fromName))
+            {
+                Activity fa;
+                if (!Enum.TryParse(fromName, true, out fa))
+                {
+                    Console.Error.WriteLine("unknown --from: " + fromName);
+                    return 2;
+                }
+                fromStyle = Palette.ResolveFor(null, null, fa, segments);
+            }
+
             var w = Console.Out;
             w.WriteLine("# effect=" + style.Effect +
                         " hz=" + style.Hz.ToString("0.###", CultureInfo.InvariantCulture) +
@@ -73,6 +86,12 @@ namespace GoveeLights
             {
                 var t = (double)i / fps;
                 var f = Effects.Render(style, t, t, segments);
+                if (fromStyle != null)
+                {
+                    // Sweep mix 0 -> 1 across the requested duration.
+                    var mix = frames <= 1 ? 1.0 : (double)i / (frames - 1);
+                    f = Effects.Blend(Effects.Render(fromStyle, t, t, segments), f, mix);
+                }
                 var cells = f.Segments ?? new[] { f.Solid };
                 w.WriteLine(t.ToString("0.000", CultureInfo.InvariantCulture) + "," +
                             string.Join(",", cells.Select(c => c.ToHex()).ToArray()));

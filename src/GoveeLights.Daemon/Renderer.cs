@@ -184,6 +184,9 @@ namespace GoveeLights
             var t = _clock.Elapsed.TotalSeconds;
             var tInState = (DateTime.UtcNow - _transitionStart).TotalSeconds;
 
+            var fading = cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs;
+            var mix = fading ? sinceTransition / cfg.Render.TransitionMs : 1.0;
+
             List<DeviceRuntime> snapshot;
             lock (_devGate) snapshot = _devices.ToList();
 
@@ -196,17 +199,17 @@ namespace GoveeLights
                 // spatial on, and that fallback depends on this device's own segment
                 // count (Palette.ResolveFor).
                 var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
+                var frame = Effects.Render(style, t, tInState, segs);
 
-                if (cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs)
+                if (fading)
                 {
+                    // Render the outgoing state too and blend, so motion cross-fades
+                    // rather than snapping. Only inside the TransitionMs window.
                     var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
-                    var mix = sinceTransition / cfg.Render.TransitionMs;
-                    style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
-                    if (style.HasColor2 && prev.HasColor2)
-                        style.Color2 = Rgb.Lerp(prev.Color2, style.Color2, mix);
+                    var prevFrame = Effects.Render(prev, t, tInState, segs);
+                    frame = Effects.Blend(prevFrame, frame, mix);
                 }
 
-                var frame = Effects.Render(style, t, tInState, segs);
                 Emit(cfg, d, style, frame);
             }
         }

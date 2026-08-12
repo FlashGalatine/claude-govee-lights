@@ -270,5 +270,35 @@ namespace GoveeLights
         {
             return s.HasColor2 ? Rgb.Lerp(s.Color2, s.Color, w) : s.Color.Scale(w);
         }
+
+        /// <summary>Blend two frames. Cross-fading whole frames rather than just the base
+        /// colour is what stops chase-to-blink from jump-cutting the motion. Shapes may
+        /// disagree about segment count, so the wider frame wins and the narrower one is
+        /// sampled proportionally.</summary>
+        public static Frame Blend(Frame a, Frame b, double mix)
+        {
+            if (mix <= 0) return a;
+            if (mix >= 1) return b;
+
+            if (a.Segments == null && b.Segments == null)
+                return new Frame { Solid = Rgb.Lerp(a.Solid, b.Solid, mix), Segments = null };
+
+            var n = Math.Max(a.Segments == null ? 1 : a.Segments.Length,
+                             b.Segments == null ? 1 : b.Segments.Length);
+            var cells = new Rgb[n];
+            for (int i = 0; i < n; i++)
+                cells[i] = Rgb.Lerp(Sample(a, i, n), Sample(b, i, n), mix);
+
+            return new Frame { Solid = Rgb.Lerp(a.Solid, b.Solid, mix), Segments = cells };
+        }
+
+        static Rgb Sample(Frame f, int i, int n)
+        {
+            if (f.Segments == null || f.Segments.Length == 0) return f.Solid;
+            if (f.Segments.Length == n) return f.Segments[i];
+            var j = (int)((long)i * f.Segments.Length / n);
+            if (j >= f.Segments.Length) j = f.Segments.Length - 1;
+            return f.Segments[j];
+        }
     }
 }

@@ -525,6 +525,44 @@ if (-not $exe) {
 
     if (($desk | Where-Object { $_ -match '^#' }) -match 'effect=breathe') { Ok 'a device with no override uses the global style' }
     else { No 'unoverridden device did not use the global style' ($desk | Where-Object { $_ -match '^#' }) }
+
+    # A blend must start at the outgoing frame and end at the incoming one.
+    $plain = @(Invoke-Dump @('--state','Error','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $blend = @(Invoke-Dump @('--from','Done','--state','Error','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $pureFrom = @(Invoke-Dump @('--state','Done','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+
+    if ($blend.Count -eq $plain.Count -and $blend.Count -gt 1) { Ok 'blended dump has the expected frame count' }
+    else { No 'blended dump frame count is wrong' "$($blend.Count) vs $($plain.Count)" }
+
+    if ($blend[0] -eq $pureFrom[0]) { Ok 'blend at mix 0 equals the outgoing frame' }
+    else { No 'blend at mix 0 is not the outgoing frame' }
+
+    if ($blend[-1] -eq $plain[-1]) { Ok 'blend at mix 1 equals the incoming frame' }
+    else { No 'blend at mix 1 is not the incoming frame' }
+
+    # The middle must be neither endpoint, or nothing is actually being blended.
+    $mid = $blend[[int]($blend.Count / 2)]
+    if ($mid -ne $plain[[int]($blend.Count / 2)] -and $mid -ne $pureFrom[[int]($blend.Count / 2)]) {
+        Ok 'blend midpoint differs from both endpoints'
+    } else { No 'blend midpoint matches an endpoint' 'Frames are not being mixed.' }
+
+    # Error and Done are both non-spatial (blink and solid collapse to a single
+    # whole-device cell), so the checks above never exercise Blend's segment-array path -
+    # a Blend that forgot Segments entirely would still pass all four. ToolEdit (chase)
+    # and ToolAgent (comet) are both spatial at 10 segments, so this transition must carry
+    # a full 10-cell array through the midpoint.
+    $spBlend = @(Invoke-Dump @('--from','ToolEdit','--state','ToolAgent','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $spMidCells = $spBlend[[int]($spBlend.Count / 2)].Split(',')
+    if ($spMidCells.Count -eq 11) { Ok 'blend midpoint keeps the full segment array for two spatial states' }
+    else { No 'blend midpoint lost the segment array' "$($spMidCells.Count) columns (want 11)" }
+
+    # ...and the cells must actually differ across the row - a Blend that lerped only
+    # Solid and broadcast it to every cell would still produce 11 columns but with every
+    # cell identical, which the column-count check above cannot tell apart from a real
+    # per-cell blend.
+    $spMidUniqueCells = @($spMidCells[1..10] | Sort-Object -Unique).Count
+    if ($spMidUniqueCells -gt 1) { Ok 'blend midpoint cells vary across the segment array' }
+    else { No 'blend midpoint cells are uniform' 'Segments may have been broadcast from Solid instead of blended per-cell.' }
 }
 
 # --------------------------------------------------------------- housekeeping
