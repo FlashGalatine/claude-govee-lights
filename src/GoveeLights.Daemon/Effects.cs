@@ -41,9 +41,14 @@ namespace GoveeLights
 
             if (s.Effect == "rainbow")
             {
+                // Bypassing Shape/ApplyDirection does not mean bypassing Direction: tShape
+                // already carries the pingpong fold (IsSpatial now includes rainbow, so the
+                // gate above computed it), and reverse gets the same mirror ApplyDirection
+                // uses for every other spatial effect.
                 var hues = new Rgb[n];
                 for (int i = 0; i < n; i++)
-                    hues[i] = Rgb.FromHsv((double)i / n + t * s.Hz, 1.0, 1.0);
+                    hues[i] = Rgb.FromHsv((double)i / n + tShape * s.Hz, 1.0, 1.0);
+                if (s.Direction == "reverse") hues = Mirror(hues);
                 return n <= 1
                     ? new Frame { Solid = hues[0], Segments = null }
                     : new Frame { Solid = hues[0], Segments = hues };
@@ -127,7 +132,8 @@ namespace GoveeLights
 
                 case "wipe":
                 {
-                    // One cycle fills the strip, the next clears it from the same end.
+                    // The first half of each cycle fills the strip; the second half clears
+                    // it from the same end. Both happen within one Hz period.
                     var w = new double[n];
                     var cycle = (t * s.Hz) - Math.Floor(t * s.Hz);
                     var pos = cycle * 2 * n;
@@ -186,6 +192,10 @@ namespace GoveeLights
             {
                 ulong x = (ulong)step * 0x9E3779B97F4A7C15UL;
                 x ^= (ulong)(uint)i * 0xBF58476D1CE4E5B9UL;
+                // Without this, (i=0, step=0) combines to exactly zero and the finalizer
+                // below maps zero to zero - segment 0 would be lit on every device's very
+                // first sparkle frame, a structural artifact rather than a hash outcome.
+                x += 0x9E3779B97F4A7C15UL;
                 x ^= x >> 30; x *= 0xBF58476D1CE4E5B9UL;
                 x ^= x >> 27; x *= 0x94D049BB133111EBUL;
                 x ^= x >> 31;
@@ -203,9 +213,15 @@ namespace GoveeLights
         {
             if (w.Length <= 1) return w;
             if (s.Direction != "reverse") return w;
+            return Mirror(w);
+        }
 
-            var o = new double[w.Length];
-            for (int i = 0; i < w.Length; i++) o[i] = w[w.Length - 1 - i];
+        /// <summary>Reverses element order. Shared by ApplyDirection and rainbow, which
+        /// bypasses the shape/stages pipeline but still owes Direction the same mirror.</summary>
+        static T[] Mirror<T>(T[] a)
+        {
+            var o = new T[a.Length];
+            for (int i = 0; i < a.Length; i++) o[i] = a[a.Length - 1 - i];
             return o;
         }
 

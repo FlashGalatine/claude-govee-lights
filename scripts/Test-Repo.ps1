@@ -435,14 +435,48 @@ if (-not $exe) {
         @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
     $mono = $true
     for ($i = 1; $i -lt $lit.Count; $i++) { if ($lit[$i] -lt $lit[$i-1]) { $mono = $false; break } }
-    if ($mono -and $lit[-1] -eq 10) { Ok 'progress fills monotonically and reaches full' }
-    else { No 'progress does not fill monotonically to full' "last=$($lit[-1])" }
+    # first=0 is a rise guard: without it, a shape stuck at all-lit from the very first
+    # frame is trivially monotonic and trivially ends at 10, so "fills" would never
+    # actually be observed to happen.
+    if ($mono -and $lit[0] -eq 0 -and $lit[-1] -eq 10) { Ok 'progress fills monotonically and reaches full' }
+    else { No 'progress does not fill monotonically to full' "first=$($lit[0]) last=$($lit[-1])" }
 
     # rainbow must actually span hues rather than painting one colour.
     $rb = Invoke-Dump @('--style','{"Effect":"rainbow","Hz":0.2,"Color":"#FFFFFF"}','--segments','10','--seconds','0.2')
     $first = @($rb | Where-Object { $_ -notmatch '^#' -and $_ })[0].Split(',')[1..10]
     if (@($first | Sort-Object -Unique).Count -ge 8) { Ok 'rainbow spans distinct hues across segments' }
     else { No 'rainbow is not spanning hues' (@($first | Sort-Object -Unique).Count) }
+
+    # ...and its hues must actually advance over time, not just across segments: the
+    # previous check inspects row 0 only, so deleting the "t * s.Hz" phase term from
+    # Effects.Render's rainbow branch would still pass it.
+    $rbTime = Invoke-Dump @('--style','{"Effect":"rainbow","Hz":0.5,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    $rbRows = @($rbTime | Where-Object { $_ -notmatch '^#' -and $_ })
+    $rbFirstRow = ($rbRows[0].Split(',')[1..10]) -join ','
+    $rbLastRow  = ($rbRows[-1].Split(',')[1..10]) -join ','
+    if ($rbFirstRow -ne $rbLastRow) { Ok 'rainbow hues advance over time' }
+    else { No 'rainbow hues do not change over time' 'Deleting the t * s.Hz phase term would still pass the hue-span check.' }
+
+    # wipe has no golden coverage, so give it a direct behavioural check: over one full
+    # Hz cycle the lit count must rise from empty to fully lit and fall back to empty,
+    # with no discontinuity where the fill phase hands off to the clear phase. Hz and
+    # fps are chosen so the midpoint (cycle=0.5) lands exactly on a sampled frame.
+    $wp = Invoke-Dump @('--style','{"Effect":"wipe","Hz":0.5,"Color":"#FFFFFF"}','--segments','10','--seconds','2','--fps','20')
+    $wpLit = @($wp | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $half = [int]($wpLit.Count / 2)
+    $risesOk = $true
+    for ($i = 1; $i -le $half; $i++) { if ($wpLit[$i] -lt $wpLit[$i-1]) { $risesOk = $false; break } }
+    $fallsOk = $true
+    for ($i = $half + 1; $i -lt $wpLit.Count; $i++) { if ($wpLit[$i] -gt $wpLit[$i-1]) { $fallsOk = $false; break } }
+    $peak = ($wpLit | Measure-Object -Maximum).Maximum
+    $noJump = $true
+    for ($i = 1; $i -lt $wpLit.Count; $i++) { if ([Math]::Abs($wpLit[$i] - $wpLit[$i-1]) -gt 2) { $noJump = $false; break } }
+    if ($risesOk -and $fallsOk -and $peak -eq 10 -and $noJump) {
+        Ok 'wipe rises to full and falls back with no discontinuity at the midpoint'
+    } else {
+        No 'wipe fill/clear shape is wrong' "rises=$risesOk falls=$fallsOk peak=$peak(want 10) noJump=$noJump"
+    }
 
     # sparkle is hashed rather than random: same input, same frames. Already covered by
     # the global determinism check, but assert it directly since it is the one effect
@@ -458,6 +492,24 @@ if (-not $exe) {
         ($_.Split(',')[1..10]) -join '' })
     if (@($spatterns | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
     else { No 'sparkle output is static' (@($spatterns | Sort-Object -Unique).Count) }
+
+    # ...and it must light a proper subset near the 0.28 threshold, not "all" or "none":
+    # the variety check above would still pass a hash that only ever lit 1 of 10 segments,
+    # or one that alternated between all-lit and all-dark whole frames. Depth is forced to
+    # 0 here (sparkle defaults to 0.06) so an "off" cell renders as literal #000000 - with
+    # the default depth every cell is a non-zero shade and this whole check is vacuous.
+    $sd = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF","Depth":0}','--segments','10','--seconds','1')
+    $sdRows = @($sd | Where-Object { $_ -notmatch '^#' -and $_ })
+    $sdLitPerRow = @($sdRows | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $sdTotalLit = ($sdLitPerRow | Measure-Object -Sum).Sum
+    $sdFraction = $sdTotalLit / ($sdRows.Count * 10)
+    $sdMixedRows = @($sdLitPerRow | Where-Object { $_ -gt 0 -and $_ -lt 10 }).Count
+    if ($sdFraction -gt 0.15 -and $sdFraction -lt 0.45 -and $sdMixedRows -gt ($sdRows.Count * 0.5)) {
+        Ok 'sparkle lights a plausible, proper subset of segments' "lit fraction=$([Math]::Round($sdFraction, 2))"
+    } else {
+        No 'sparkle lit fraction is not plausible' "lit fraction=$([Math]::Round($sdFraction, 2)), mixed rows=$sdMixedRows/$($sdRows.Count)"
+    }
 }
 
 # --------------------------------------------------------------- housekeeping
