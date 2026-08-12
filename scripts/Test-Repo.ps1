@@ -566,7 +566,8 @@ if (-not $exe) {
 }
 
 # Shipping an example config that names an effect the engine does not implement
-# would silently render everything as solid.
+# would render as solid, only warning once per distinct value in the daemon log
+# rather than failing loudly, so this check catches it before it ships.
 $known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
 if ($parsed['config/config.example.json']) {
     $badEffects = @()

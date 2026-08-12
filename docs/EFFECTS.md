@@ -2,27 +2,52 @@
 
 Every animation is computed by the daemon and pushed as discrete frames — the Govee
 API has no effects of its own. An effect is a *shape* producing one weight per
-segment; four shared modifiers then transform it. Because the modifiers are applied
-outside the effect, they work on all of them the same way.
+segment; a shared pipeline of stages — direction, easing, depth, then colour — then
+transforms most of them the same way, which is what keeps ten effects from inventing
+ten different meanings for "reverse." That pipeline is not perfectly uniform, though:
+`rainbow` bypasses it entirely and computes colour directly (see its row below), and
+`Direction` reaches different effects differently (see the field table).
 
 ## Style fields
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Color` | `#RRGGBB` | The primary colour. |
-| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. |
-| `Effect` | name | See the table below. |
-| `Hz` | number | Rate. Cycles per second for time-based effects; twinkle steps per second for `sparkle`. |
-| `Brightness` | 0–100 | Device brightness. `-1` leaves it alone. |
-| `Direction` | `forward` \| `reverse` \| `pingpong` | `reverse` mirrors the strip; `pingpong` alternates each cycle so motion bounces. No effect on a single-zone device. |
-| `Easing` | `linear` \| `sine` \| `cubic` \| `expo` | Curve applied to the weights. |
-| `Tail` | number | Trail length as a multiple of the effect's natural length. `1.0` is default; `2.0` is twice as long. |
-| `Depth` | 0–1 | Intensity floor. Weights are rescaled into `[Depth, 1]`, so the colour never fully disappears. |
-| `FullSeconds` | number | `progress` only: seconds until the bar is full. |
+| `Color` | `#RRGGBB` | The primary colour. Ignored by `rainbow`. |
+| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. Ignored by `rainbow`. |
+| `Effect` | name | See the table below. An unrecognised name falls back to `solid` — see "Defaults and out-of-range values" below. |
+| `Hz` | number | Rate. Cycles per second for time-based effects; twinkle steps per second for `sparkle`. Defaults to `0.6`; a value `<= 0` also falls back to `0.6`. |
+| `Brightness` | 0–100 | Device brightness. Only sent when it resolves `> 0` — both `-1` (the default) and `0` leave the device's brightness alone. When it is sent, it is also capped by that device's own `BrightnessCap`. |
+| `Direction` | `forward` \| `reverse` \| `pingpong` | `reverse` mirrors whatever array the shape produced: a no-op for the effects that render one weight for the whole device (`solid`, `breathe`, `pulse`, `blink`), but a real mirror for every effect marked "needs segments" below, for `rainbow`, and for `sparkle`'s per-segment array once there is more than one segment. `pingpong` is narrower — it only applies to the effects marked "needs segments" (which includes `rainbow`), and only with more than one segment; it does nothing for `solid`, `breathe`, `pulse`, `blink` or `sparkle`, regardless of segment count. An unrecognised value falls back to `forward`. |
+| `Easing` | `linear` \| `sine` \| `cubic` \| `expo` | Curve applied to the weights. Ignored by `rainbow`. Defaults to `linear`; an unrecognised value also falls back to `linear`. |
+| `Tail` | number | `chase` and `comet` only: trail length as a multiple of the effect's natural length. `1.0` is default; `2.0` is twice as long. Silently has no effect on any other effect. A value `<= 0` falls back to `1.0`. |
+| `Depth` | 0–1 | Intensity floor. Weights are rescaled into `[Depth, 1]`, so the colour never fully disappears. Ignored by `rainbow`. Defaults to `0`; only `breathe`, `pulse`, `blink` and `sparkle` raise it via their own built-in defaults (see the effects table) — every other effect keeps the base value of `0`. Values outside `0..1` are clamped to the nearer end. |
+| `FullSeconds` | number | `progress` only: seconds until the bar is full. Defaults to `30`; a value `<= 0` also falls back to `30`. |
 
-Any field may be omitted. Omitted means *inherit* — from the global `States` entry,
-then the built-in state default, then the effect's own default. This is why you can
-set just `Hz` on one state and leave everything else alone.
+Any field may be omitted. Omitted means *inherit*, checked in this order — strongest
+first: a device's own `States` entry (set inside that device's block in `Devices`),
+then the global `States` entry, then the built-in per-state default, then the
+effect's own default. This is why you can set just `Hz` on one state and leave
+everything else alone, and why one device can override a single field of one state
+without restating the rest.
+
+## Defaults and out-of-range values
+
+The table above notes each field's fallback inline; the short version is that nothing
+you omit or mistype leaves a field unset. Two kinds of correction happen at resolve
+time:
+
+- **Omitted fields** inherit down the chain above, ending at the built-in defaults
+  listed in the table (`Hz` 0.6, `Direction` forward, `Easing` linear, `Tail` 1.0,
+  `Depth` 0, `FullSeconds` 30).
+- **Present but nonsensical values** are corrected rather than left broken: `Hz`,
+  `Tail` and `FullSeconds` fall back to their defaults if `<= 0`; `Depth` is clamped
+  into `0..1`; an unrecognised `Effect`, `Direction` or `Easing` falls back to
+  `solid`, `forward` or `linear` respectively.
+
+An unrecognised `Effect`, `Direction` or `Easing` also logs a `style_unknown_value`
+warning, once per distinct bad value — worth checking `/govee logs` after
+hand-editing a config, since a typo does not otherwise announce itself beyond the
+lights not doing what you expected.
 
 ## Effects
 
@@ -49,7 +74,7 @@ Effects marked "needs segments" fall back to `breathe` on a single-zone device.
 "ToolShell": { "Color": "#FF7A18", "Effect": "chase", "Direction": "pingpong", "Hz": 0.8 }
 ```
 
-The modifier pipeline gives this for free, so implementing it separately would be
+The shared pipeline gives this for free, so implementing it separately would be
 duplicating `Direction`.
 
 ## Cost
@@ -73,5 +98,13 @@ Start-Process -FilePath dist\daemon\GoveeLightsDaemon.exe -NoNewWindow -Wait `
 
 `--state <name>` renders a configured state instead of a literal style, `--device
 <name>` applies that device's overrides, `--config <path>` reads a specific config
-file, and `--from <state>` dumps a cross-fade. Output must be redirected: the daemon
-is a windowless executable, so `&` alone will not capture it.
+file, `--from <state>` dumps a cross-fade, and `--fps <n>` sets the sample rate
+(default `25`). Output must be redirected: the daemon is a windowless executable, so
+`&` alone will not capture it.
+
+A few flags interact in ways that are not obvious: `--style` makes `--state`,
+`--config` and `--device` inert — a literal style resolves with no config involved at
+all. `--device` only has anything to look up when `--config` is also given. And
+`--from` always resolves the earlier state against the built-in defaults, ignoring
+both `--config` and `--device`, so a dumped cross-fade never reflects your config even
+when the target state does.

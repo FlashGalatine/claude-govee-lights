@@ -116,10 +116,12 @@ lights change immediately, no restart needed.
 ```
 
 Ten effects are available — `solid`, `breathe`, `pulse`, `blink`, `chase`, `comet`,
-`wipe`, `progress`, `sparkle` and `rainbow` — each tunable with `Color2`,
-`Direction`, `Easing`, `Tail` and `Depth`. Every field is optional and inherits when
-omitted, so you can change one value without restating the rest. Individual devices
-can override any state via a `States` block inside their `Devices` entry.
+`wipe`, `progress`, `sparkle` and `rainbow` — most of them further tunable with
+`Color2`, `Direction`, `Easing`, `Tail` and `Depth`, though which of those actually
+do something varies by effect (`rainbow` ignores most of them; `Tail` only affects
+`chase` and `comet`). Every field is optional and inherits when omitted, so you can
+change one value without restating the rest. Individual devices can override any
+state via a `States` block inside their `Devices` entry.
 
 See [docs/EFFECTS.md](docs/EFFECTS.md) for the full reference, and run
 `/govee test <state>` to preview a state on your lights.
