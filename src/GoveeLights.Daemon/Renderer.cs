@@ -195,11 +195,11 @@ namespace GoveeLights
                 // comet, ...) falls back to breathe when a device has no strip to be
                 // spatial on, and that fallback depends on this device's own segment
                 // count (Palette.ResolveFor).
-                var style = Palette.ResolveFor(cfg, null, _current, segs);
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
 
                 if (cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs)
                 {
-                    var prev = Palette.ResolveFor(cfg, null, _previous, segs);
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
                     var mix = sinceTransition / cfg.Render.TransitionMs;
                     style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
                     if (style.HasColor2 && prev.HasColor2)

@@ -510,6 +510,21 @@ if (-not $exe) {
     } else {
         No 'sparkle lit fraction is not plausible' "lit fraction=$([Math]::Round($sdFraction, 2)), mixed rows=$sdMixedRows/$($sdRows.Count)"
     }
+
+    # Per-device overrides layer on top of the global States map. CeilingStrip pins
+    # Thinking to solid while inheriting the colour; DeskStrip inherits everything.
+    $fixture = Join-Path $root 'tests/fixtures/device-override.json'
+    $ceiling = Invoke-Dump @('--config',$fixture,'--state','Thinking','--device','CeilingStrip','--segments','1','--seconds','1')
+    $desk    = Invoke-Dump @('--config',$fixture,'--state','Thinking','--device','DeskStrip','--segments','1','--seconds','1')
+
+    if (($ceiling | Where-Object { $_ -match '^#' }) -match 'effect=solid') { Ok 'device override changes the effect' }
+    else { No 'device override was ignored' ($ceiling | Where-Object { $_ -match '^#' }) }
+
+    if (($ceiling | Where-Object { $_ -match '^#' }) -match 'color=#3366CC') { Ok 'device override inherits unset fields' }
+    else { No 'device override did not inherit Color' ($ceiling | Where-Object { $_ -match '^#' }) }
+
+    if (($desk | Where-Object { $_ -match '^#' }) -match 'effect=breathe') { Ok 'a device with no override uses the global style' }
+    else { No 'unoverridden device did not use the global style' ($desk | Where-Object { $_ -match '^#' }) }
 }
 
 # --------------------------------------------------------------- housekeeping
