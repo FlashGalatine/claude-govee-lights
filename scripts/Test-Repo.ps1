@@ -565,6 +565,26 @@ if (-not $exe) {
     else { No 'blend midpoint cells are uniform' 'Segments may have been broadcast from Solid instead of blended per-cell.' }
 }
 
+# Shipping an example config that names an effect the engine does not implement
+# would silently render everything as solid.
+$known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+if ($parsed['config/config.example.json']) {
+    $badEffects = @()
+    # Both the live States block and the _examples_states showcase, since a broken
+    # example is exactly what a user would copy.
+    foreach ($blockName in 'States', '_examples_states') {
+        $block = $parsed['config/config.example.json'].$blockName
+        if (-not $block) { continue }
+        foreach ($p in $block.PSObject.Properties) {
+            if ($p.Name -eq '_comment') { continue }
+            $e = $p.Value.Effect
+            if ($e -and ($known -notcontains $e)) { $badEffects += "$blockName.$($p.Name)=$e" }
+        }
+    }
+    if ($badEffects.Count -eq 0) { Ok 'config.example.json names only known effects' }
+    else { No 'config.example.json names an unknown effect' ($badEffects -join ', ') }
+}
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
@@ -573,6 +593,7 @@ else { No '.gitignore excludes the API GUID' 'The GUID is a credential.' }
 
 if (Test-Path (Join-Path $root 'LICENSE')) { Ok 'LICENSE present' } else { No 'LICENSE present' }
 if (Test-Path (Join-Path $root 'docs/API-NOTES.md')) { Ok 'docs/API-NOTES.md present' } else { No 'docs/API-NOTES.md present' }
+if (Test-Path (Join-Path $root 'docs/EFFECTS.md')) { Ok 'docs/EFFECTS.md present' } else { No 'docs/EFFECTS.md present' }
 
 Write-Host ''
 Write-Host ("=== $pass passed, $fail failed ===") -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
