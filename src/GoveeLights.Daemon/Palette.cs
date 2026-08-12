@@ -79,7 +79,7 @@ namespace GoveeLights
         {
             switch (effect)
             {
-                case "chase": case "comet": case "wipe": case "progress": return true;
+                case "chase": case "comet": case "wipe": case "progress": case "rainbow": return true;
                 default: return false;
             }
         }

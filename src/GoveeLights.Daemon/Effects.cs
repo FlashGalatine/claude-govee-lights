@@ -39,6 +39,16 @@ namespace GoveeLights
             var tShape = (s.Direction == "pingpong" && n > 1 && Palette.IsSpatial(s.Effect))
                 ? FoldTime(t, s.Hz) : t;
 
+            if (s.Effect == "rainbow")
+            {
+                var hues = new Rgb[n];
+                for (int i = 0; i < n; i++)
+                    hues[i] = Rgb.FromHsv((double)i / n + t * s.Hz, 1.0, 1.0);
+                return n <= 1
+                    ? new Frame { Solid = hues[0], Segments = null }
+                    : new Frame { Solid = hues[0], Segments = hues };
+            }
+
             var w = Shape(s.Effect, tShape, tInState, n, s);
             w = ApplyDirection(w, s);
             ApplyEasing(w, s.Easing);
@@ -115,6 +125,48 @@ namespace GoveeLights
                     return w;
                 }
 
+                case "wipe":
+                {
+                    // One cycle fills the strip, the next clears it from the same end.
+                    var w = new double[n];
+                    var cycle = (t * s.Hz) - Math.Floor(t * s.Hz);
+                    var pos = cycle * 2 * n;
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (pos <= n) w[i] = i < pos ? 1.0 : 0.0;
+                        else          w[i] = i < (pos - n) ? 0.0 : 1.0;
+                    }
+                    return w;
+                }
+
+                case "progress":
+                {
+                    // Fills by elapsed time in the state, then holds full. The partial
+                    // leading cell keeps it from stepping a whole segment at a time.
+                    var w = new double[n];
+                    var frac = tInState / s.FullSeconds;
+                    if (frac < 0) frac = 0;
+                    if (frac > 1) frac = 1;
+                    var edge = frac * n;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var c = edge - i;
+                        w[i] = c < 0 ? 0.0 : (c > 1 ? 1.0 : c);
+                    }
+                    return w;
+                }
+
+                case "sparkle":
+                {
+                    // Hashed, not random: Hz becomes a twinkle rate instead of a 25fps
+                    // strobe, the segment CSV only changes when the step advances so the
+                    // rate limiter is not fighting it, and the output stays reproducible.
+                    var w = new double[n];
+                    var step = (long)Math.Floor(t * s.Hz);
+                    for (int i = 0; i < n; i++) w[i] = Hash01(i, step) < 0.28 ? 1.0 : 0.0;
+                    return w;
+                }
+
                 default: // "solid"
                     return new[] { 1.0 };
             }
@@ -124,6 +176,21 @@ namespace GoveeLights
         {
             var d = Math.Abs(i - head);
             return Math.Min(d, n - d);
+        }
+
+        /// <summary>SplitMix64 finalizer over (segment, step). Deterministic and evenly
+        /// distributed, which is all sparkle needs.</summary>
+        static double Hash01(int i, long step)
+        {
+            unchecked
+            {
+                ulong x = (ulong)step * 0x9E3779B97F4A7C15UL;
+                x ^= (ulong)(uint)i * 0xBF58476D1CE4E5B9UL;
+                x ^= x >> 30; x *= 0xBF58476D1CE4E5B9UL;
+                x ^= x >> 27; x *= 0x94D049BB133111EBUL;
+                x ^= x >> 31;
+                return (x >> 11) * (1.0 / 9007199254740992.0);
+            }
         }
 
         // ---- stages -----------------------------------------------------------------

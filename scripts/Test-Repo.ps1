@@ -264,7 +264,8 @@ function Invoke-Dump {
 if (-not $exe) {
     Write-Host '  SKIP  no build output found (run scripts\Build.ps1)' -ForegroundColor DarkGray
 } else {
-    $effects = @('solid','breathe','pulse','blink','chase','comet')
+    $effects = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+    $golden  = @('solid','breathe','pulse','blink','chase','comet')
 
     # Renders at all three segment shapes: 1 (whole-device), 3 (short strip), 10 (typical).
     foreach ($e in $effects) {
@@ -280,9 +281,10 @@ if (-not $exe) {
                 # Effects.Whole(), which deliberately skips the segment array because
                 # DeviceColorControl is cheaper for uniform colour. Spatial effects fall back to
                 # breathe at one segment, so they collapse to a single cell there too.
-                # Task 4 adds wipe, progress, sparkle and rainbow - wipe/progress/rainbow are
-                # spatial and sparkle paints per segment too, so extend $spatial then.
-                $spatial = @('chase','comet')
+                # This is "paints per segment", which is deliberately not the same list as
+                # Palette.IsSpatial: sparkle paints per segment but is not spatial, because at
+                # one segment it reads fine as a random blink and needs no breathe fallback.
+                $spatial = @('chase','comet','wipe','progress','sparkle','rainbow')
                 $wantCells = if (($spatial -contains $e) -and $n -gt 1) { $n } else { 1 }
                 if ($cells.Count -ne $wantCells) { $bad = $true; break }
                 foreach ($c in $cells) { if ($c -notmatch '^#[0-9A-F]{6}$') { $bad = $true; break } }
@@ -298,8 +300,8 @@ if (-not $exe) {
     if (($a -join "`n") -eq ($b -join "`n")) { Ok 'identical inputs produce identical frames' }
     else { No 'render output is not deterministic' 'Goldens and sparkle both depend on this.' }
 
-    # Goldens.
-    foreach ($e in $effects) {
+    # Goldens. Only the six original effects have golden files.
+    foreach ($e in $golden) {
         $goldenPath = Join-Path $root "tests/golden/$e.csv"
         if (-not (Test-Path $goldenPath)) { No "golden exists for $e" $goldenPath; continue }
         $got = Invoke-Dump @('--style', "{`"Color`":`"#3366CC`",`"Effect`":`"$e`",`"Hz`":0.6}",
@@ -426,6 +428,36 @@ if (-not $exe) {
     if ($wideAbove -gt $narrowAbove) {
         Ok 'Tail widens the comet falloff' "tail=1.0 -> $narrowAbove segments, tail=2.5 -> $wideAbove segments"
     } else { No 'Tail had no effect on comet falloff' "tail=1.0 -> $narrowAbove, tail=2.5 -> $wideAbove" }
+
+    # progress is driven by time-in-state, so it must be monotonically non-decreasing.
+    $p = Invoke-Dump @('--style','{"Effect":"progress","Color":"#FFFFFF","FullSeconds":2}','--segments','10','--seconds','3')
+    $lit = @($p | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $mono = $true
+    for ($i = 1; $i -lt $lit.Count; $i++) { if ($lit[$i] -lt $lit[$i-1]) { $mono = $false; break } }
+    if ($mono -and $lit[-1] -eq 10) { Ok 'progress fills monotonically and reaches full' }
+    else { No 'progress does not fill monotonically to full' "last=$($lit[-1])" }
+
+    # rainbow must actually span hues rather than painting one colour.
+    $rb = Invoke-Dump @('--style','{"Effect":"rainbow","Hz":0.2,"Color":"#FFFFFF"}','--segments','10','--seconds','0.2')
+    $first = @($rb | Where-Object { $_ -notmatch '^#' -and $_ })[0].Split(',')[1..10]
+    if (@($first | Sort-Object -Unique).Count -ge 8) { Ok 'rainbow spans distinct hues across segments' }
+    else { No 'rainbow is not spanning hues' (@($first | Sort-Object -Unique).Count) }
+
+    # sparkle is hashed rather than random: same input, same frames. Already covered by
+    # the global determinism check, but assert it directly since it is the one effect
+    # where non-determinism would be easy to reintroduce.
+    $s1 = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    $s2 = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    if (($s1 -join "`n") -eq ($s2 -join "`n")) { Ok 'sparkle is deterministic' }
+    else { No 'sparkle is not deterministic' 'Use the hash, not Random.' }
+
+    # ...and that it actually twinkles. Compare only the cell columns: every row carries a
+    # distinct timestamp in column 0, so uniquing whole rows would pass no matter what.
+    $spatterns = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        ($_.Split(',')[1..10]) -join '' })
+    if (@($spatterns | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
+    else { No 'sparkle output is static' (@($spatterns | Sort-Object -Unique).Count) }
 }
 
 # --------------------------------------------------------------- housekeeping
