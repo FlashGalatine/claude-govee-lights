@@ -506,21 +506,21 @@ namespace GoveeLights
             r.HasColor2 = !string.IsNullOrEmpty(c2);
             r.Color2 = r.HasColor2 ? Rgb.Parse(c2, new Rgb(0, 0, 0)) : new Rgb(0, 0, 0);
 
-            r.Hz = PickD(all, x => x.Hz, 0.6);
+            r.Hz = PickN(all, x => x.Hz, 0.6);
             if (r.Hz <= 0) r.Hz = 0.6;               // Offline stores Hz 0; solid ignores it anyway
 
-            r.Brightness = PickI(all, x => x.Brightness, -1);
+            r.Brightness = PickN(all, x => x.Brightness, -1);
             r.Direction  = Norm(Pick(all, x => x.Direction), KnownDirections, "forward", "Direction");
             r.Easing     = Norm(Pick(all, x => x.Easing), KnownEasings, "linear", "Easing");
 
-            r.Tail = PickD(all, x => x.Tail, 1.0);
+            r.Tail = PickN(all, x => x.Tail, 1.0);
             if (r.Tail <= 0) r.Tail = 1.0;
 
-            r.Depth = PickD(all, x => x.Depth, 0.0);
+            r.Depth = PickN(all, x => x.Depth, 0.0);
             if (r.Depth < 0) r.Depth = 0;
             if (r.Depth > 1) r.Depth = 1;
 
-            r.FullSeconds = PickD(all, x => x.FullSeconds, 30.0);
+            r.FullSeconds = PickN(all, x => x.FullSeconds, 30.0);
             if (r.FullSeconds <= 0) r.FullSeconds = 30.0;
 
             return r;
@@ -537,18 +537,7 @@ namespace GoveeLights
             return null;
         }
 
-        static double PickD(StateStyle[] layers, Func<StateStyle, double?> f, double dflt)
-        {
-            for (int i = layers.Length - 1; i >= 0; i--)
-            {
-                if (layers[i] == null) continue;
-                var v = f(layers[i]);
-                if (v.HasValue) return v.Value;
-            }
-            return dflt;
-        }
-
-        static int PickI(StateStyle[] layers, Func<StateStyle, int?> f, int dflt)
+        static T PickN<T>(StateStyle[] layers, Func<StateStyle, T?> f, T dflt) where T : struct
         {
             for (int i = layers.Length - 1; i >= 0; i--)
             {
@@ -1032,8 +1021,9 @@ Append inside the `else` branch of the `Effects engine` section in `scripts/Test
     else { No 'Depth floor not applied' "min channel $dmin, expected 128" }
 
     # Color2 replaces "scale toward black" with a blend between two colours, so the
-    # dimmest frame should be Color2 rather than near-black.
-    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000"}','--segments','1','--seconds','2')
+    # dimmest frame should be Color2 rather than near-black. Depth is pinned to 0: blink
+    # defaults to Depth 0.06, which would lift the low end off Color2 exactly.
+    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000","Depth":0}','--segments','1','--seconds','2')
     $c2rows = @($c2 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object { $_.Split(',')[1] })
     if (($c2rows | Sort-Object -Unique) -contains '#FF0000') { Ok 'Color2 is used as the low end of the blend' }
     else { No 'Color2 was not blended' ($c2rows | Sort-Object -Unique) -join ' ' }
@@ -1230,10 +1220,12 @@ Then append these checks:
     if (($s1 -join "`n") -eq ($s2 -join "`n")) { Ok 'sparkle is deterministic' }
     else { No 'sparkle is not deterministic' 'Use the hash, not Random.' }
 
-    # ...and that it actually twinkles: some segments lit, some not, changing over time.
-    $srows = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ })
-    if (@($srows | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
-    else { No 'sparkle output is static' }
+    # ...and that it actually twinkles. Compare only the cell columns: every row carries a
+    # distinct timestamp in column 0, so uniquing whole rows would pass no matter what.
+    $spatterns = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        ($_.Split(',')[1..10]) -join '' })
+    if (@($spatterns | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
+    else { No 'sparkle output is static' (@($spatterns | Sort-Object -Unique).Count) }
 ```
 
 - [ ] **Step 6: Run the tests**
@@ -1757,15 +1749,22 @@ Expected: `=== N passed, 0 failed ===`.
 
 - [ ] **Step 7: Verify the new effects on hardware**
 
+The built-in state defaults are unchanged by this work, so `/govee test <state>` still
+shows the original styles. To see the new effects on hardware, temporarily paste one of
+the `_examples_states` entries into the live `States` block of
+`%LOCALAPPDATA%\ClaudeGovee\config.json` — it hot-reloads on save — then test it:
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Build.ps1 -Restart
+# Paste {"Color":"#FF7A18","Effect":"chase","Direction":"pingpong","Hz":0.8} as ToolShell, save, then:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test ToolShell
+# Paste {"Color":"#00C8A0","Effect":"progress","FullSeconds":8} as Compacting, save, then:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test Compacting
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test Error
 ```
 
-Expected: `ToolShell` bounces rather than wrapping; `Compacting` fills as a bar;
-`Error` blinks between bright red and dark red rather than red and black.
+Expected: `ToolShell` bounces rather than wrapping, and `Compacting` fills as a bar.
+Revert the config edits afterwards. If you have no Govee hardware to hand, say so and
+skip this step — every other check in this task is automated.
 
 - [ ] **Step 8: Commit**
 
