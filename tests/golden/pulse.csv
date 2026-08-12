@@ -1,4 +1,4 @@
-# effect=pulse hz=0.6 color=#3366CC segments=10 fps=25
+# effect=pulse hz=0.6 color=#3366CC color2=none dir=forward ease=cubic tail=1 depth=0.08 segments=10 fps=25
 0.000,#0A1428
 0.040,#0D1A34
 0.080,#112244

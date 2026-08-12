@@ -26,12 +26,14 @@ namespace GoveeLights
             if (fps < 1) fps = 1;
             if (segments < 1) segments = 1;
 
-            StateStyle style;
+            ResolvedStyle style;
             if (!string.IsNullOrEmpty(styleJson))
             {
-                try { style = new JavaScriptSerializer().Deserialize<StateStyle>(styleJson); }
+                StateStyle raw;
+                try { raw = new JavaScriptSerializer().Deserialize<StateStyle>(styleJson); }
                 catch (Exception ex) { Console.Error.WriteLine("bad --style: " + ex.Message); return 2; }
-                if (style == null) { Console.Error.WriteLine("bad --style: null"); return 2; }
+                if (raw == null) { Console.Error.WriteLine("bad --style: null"); return 2; }
+                style = Palette.ResolveStyle(raw);
             }
             else
             {
@@ -41,22 +43,36 @@ namespace GoveeLights
                     Console.Error.WriteLine("unknown --state: " + stateName);
                     return 2;
                 }
-                style = Palette.For(null, a);
+                DaemonConfig cfg = null;
+                var configPath = Arg(args, "--config", null);
+                if (!string.IsNullOrEmpty(configPath))
+                {
+                    string e;
+                    cfg = DaemonConfig.Load(configPath, out e);
+                    if (cfg == null) { Console.Error.WriteLine("bad --config: " + e); return 2; }
+                }
+                DeviceConfig dev = null;
+                var deviceName = Arg(args, "--device", null);
+                if (cfg != null && !string.IsNullOrEmpty(deviceName))
+                    dev = cfg.Devices.FirstOrDefault(x => string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
+                style = Palette.Resolve(cfg, dev, a);
             }
 
-            var color = Rgb.Parse(style.Color, new Rgb(120, 120, 120));
-
             var w = Console.Out;
-            w.WriteLine("# effect=" + (style.Effect ?? "solid") +
+            w.WriteLine("# effect=" + style.Effect +
                         " hz=" + style.Hz.ToString("0.###", CultureInfo.InvariantCulture) +
-                        " color=" + color.ToHex() +
+                        " color=" + style.Color.ToHex() +
+                        " color2=" + (style.HasColor2 ? style.Color2.ToHex() : "none") +
+                        " dir=" + style.Direction + " ease=" + style.Easing +
+                        " tail=" + style.Tail.ToString("0.###", CultureInfo.InvariantCulture) +
+                        " depth=" + style.Depth.ToString("0.###", CultureInfo.InvariantCulture) +
                         " segments=" + segments + " fps=" + fps);
 
             var frames = (int)Math.Round(seconds * fps);
             for (int i = 0; i < frames; i++)
             {
                 var t = (double)i / fps;
-                var f = Effects.Render(style, t, segments, color);
+                var f = Effects.Render(style, t, t, segments);
                 var cells = f.Segments ?? new[] { f.Solid };
                 w.WriteLine(t.ToString("0.000", CultureInfo.InvariantCulture) + "," +
                             string.Join(",", cells.Select(c => c.ToHex()).ToArray()));

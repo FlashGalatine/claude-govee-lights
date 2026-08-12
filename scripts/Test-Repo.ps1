@@ -308,6 +308,22 @@ if (-not $exe) {
         if (($got -join "`n") -eq ($want -join "`n")) { Ok "$e matches its golden frames" }
         else { No "$e output changed" "Compare against tests/golden/$e.csv" }
     }
+
+    # The bug this whole refactor exists to fix: an entry that sets only Hz used to be
+    # discarded wholesale because it carried no Color, silently reverting to defaults.
+    $partial = Invoke-Dump @('--style','{"Effect":"breathe","Hz":2.0,"Color":"#3366CC"}','--segments','1','--seconds','1')
+    $full    = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#3366CC"}','--segments','1','--seconds','1')
+    if (($partial -join "`n") -ne ($full -join "`n")) { Ok 'Hz is honoured independently of other fields' }
+    else { No 'Hz had no effect' 'Partial overrides are being discarded.' }
+
+    # Depth is an inherited effect default, not a per-state one: breathe must still floor
+    # at 0.35 of the colour even though no state specifies Depth.
+    $b = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#FFFFFF"}','--segments','1','--seconds','2')
+    $vals = @($b | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        [Convert]::ToInt32($_.Split(',')[1].Substring(1,2), 16) })
+    $min = ($vals | Measure-Object -Minimum).Minimum
+    if ($min -ge 88 -and $min -le 91) { Ok 'breathe inherits its 0.35 depth floor' "min channel $min" }
+    else { No 'breathe depth floor is wrong' "min channel $min, expected 89" }
 }
 
 # --------------------------------------------------------------- housekeeping

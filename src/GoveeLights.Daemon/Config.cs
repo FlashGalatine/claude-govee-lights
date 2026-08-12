@@ -13,14 +13,27 @@ namespace GoveeLights
         public int BrightnessCap { get; set; } = 100;
         public bool Animate { get; set; } = true;
         public bool ManageRazerSwitch { get; set; } = true;
+
+        /// <summary>Per-device style overrides, layered over the global States map.
+        /// Lets a desk strip chase while a ceiling strip only breathes.</summary>
+        public Dictionary<string, StateStyle> States { get; set; } = new Dictionary<string, StateStyle>();
     }
 
+    /// <summary>A partial style. null means "inherit from the layer below" - see
+    /// Palette.Resolve. Every field is nullable precisely so a config can override one
+    /// value without restating the rest.</summary>
     public class StateStyle
     {
-        public string Color { get; set; }
-        public string Effect { get; set; }          // solid | breathe | pulse | blink | chase | comet
-        public double Hz { get; set; } = 0.6;
-        public int Brightness { get; set; } = -1;   // -1 = leave brightness alone
+        public string  Color       { get; set; }
+        public string  Color2      { get; set; }  // null = single-colour: weight scales toward black
+        public string  Effect      { get; set; }  // solid|breathe|pulse|blink|chase|comet|wipe|progress|sparkle|rainbow
+        public double? Hz          { get; set; }
+        public int?    Brightness  { get; set; }  // null = inherit; -1 = leave brightness alone
+        public string  Direction   { get; set; }  // forward|reverse|pingpong
+        public string  Easing      { get; set; }  // linear|sine|cubic|expo
+        public double? Tail        { get; set; }  // trail length, 1.0 = the effect's natural length
+        public double? Depth       { get; set; }  // 0..1 intensity floor
+        public double? FullSeconds { get; set; }  // progress: seconds to a full bar
     }
 
     public class RenderConfig
@@ -112,6 +125,8 @@ namespace GoveeLights
             if (Render == null) Render = new RenderConfig();
             if (Devices == null) Devices = new List<DeviceConfig>();
             if (States == null) States = new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
+            foreach (var d in Devices)
+                if (d.States == null) d.States = new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
             if (ToolClassMap == null) ToolClassMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (QuietHours == null) QuietHours = new QuietHours();
             if (Render.TickMs < 10) Render.TickMs = 10;
