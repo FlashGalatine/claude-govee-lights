@@ -820,6 +820,7 @@ namespace GoveeLights
 
             var w = Shape(effect, t, tInState, n, s);
             w = ApplyDirection(w, s, t);
+            // AMENDED IN REVIEW: see the note at the end of this task.
             ApplyEasing(w, s.Easing);
             ApplyDepth(w, s.Depth);
             return ToFrame(w, s, n);
@@ -1045,6 +1046,22 @@ git add src/GoveeLights.Daemon/Effects.cs scripts/Test-Repo.ps1
 git commit -m "Replace the effects switch with a shape-plus-stages pipeline"
 ```
 
+**Amended during review.** Two defects in the design above were found by the task review
+and fixed in a follow-up commit; the code in this section is the pre-fix version and the
+repository is the authority:
+
+1. The `n <= 1 && IsSpatial(effect)` fallback rewrote the effect name to `breathe` while
+   keeping the *original* effect's resolved style, so chase and comet lost breathe's 0.35
+   depth floor and went fully black on one-zone devices. The fallback moved into
+   `Palette.ResolveFor(cfg, device, state, segments)`, which re-resolves with `Effect`
+   forced to `breathe` so breathe's own effect-defaults apply. `IsSpatial` moved to
+   `Palette` as the single source of truth, and `Effects.Render` no longer rewrites the
+   effect name.
+2. `pingpong` as an array mirror teleported the head across the strip at each turnaround,
+   because the circular `head` kept advancing underneath the mirror. It became a phase
+   fold (`FoldTime`) applied before the shape, gated to spatial effects with more than one
+   segment; `ApplyDirection` now handles `reverse` only.
+
 ---
 
 ### Task 4: Four new effects
@@ -1157,10 +1174,19 @@ Add the hash helper alongside `CircularDistance`:
 
 - [ ] **Step 3: Wire rainbow into `Render` and the spatial list**
 
-Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path entirely. In `Effects.Render`, insert immediately after the `if (n <= 1 && IsSpatial(effect))` line:
+Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path entirely.
+
+First add `"rainbow"` to `Palette.IsSpatial` alongside `chase`, `comet`, `wipe` and
+`progress`. That is what makes a one-zone device fall back to `breathe` **with breathe's
+own `Depth 0.35`** — the fallback happens during resolution, in `Palette.ResolveFor`, so by
+the time `Effects.Render` sees the style the effect name is already `breathe` and the
+rainbow branch below is correctly skipped.
+
+Then, in `Effects.Render`, insert the hue branch immediately before the shape-and-stages
+call (it keys off the already-resolved `s.Effect`, and `Render` no longer rewrites it):
 
 ```csharp
-            if (effect == "rainbow")
+            if (s.Effect == "rainbow")
             {
                 var hues = new Rgb[n];
                 for (int i = 0; i < n; i++)
@@ -1171,7 +1197,7 @@ Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path enti
             }
 ```
 
-Add `case "rainbow":` to `IsSpatial` alongside `chase`/`comet`/`wipe`/`progress`. Note that `sparkle` is deliberately **not** spatial: on a single zone it reads as a random blink, which is fine.
+Note that `sparkle` is deliberately **not** in `Palette.IsSpatial`: on a single zone it reads as a random blink, which needs no `breathe` fallback. It still paints per segment when there is more than one.
 
 - [ ] **Step 4: Build**
 
@@ -1206,7 +1232,7 @@ four new effects are checked for the right shape rather than waved through:
 ```
 
 Note this list is "paints per segment", which is deliberately **not** the same as
-`Effects.IsSpatial`: `sparkle` paints per segment but is not in `IsSpatial`, because at one
+`Palette.IsSpatial`: `sparkle` paints per segment but is not in `IsSpatial`, because at one
 segment it reads fine as a random blink and needs no `breathe` fallback.
 
 Then append these checks:
@@ -1267,12 +1293,12 @@ git commit -m "Add wipe, progress, sparkle and rainbow effects"
 - Test: `scripts/Test-Repo.ps1`
 
 **Interfaces:**
-- Consumes: `Palette.Resolve(cfg, device, state)` (Task 2), `DeviceConfig.States` (Task 2), `FrameDump`'s `--config` / `--device` flags (Task 2).
+- Consumes: `Palette.ResolveFor(cfg, device, state, segments)` (Task 3 fix round), `DeviceConfig.States` (Task 2), `FrameDump`'s `--config` / `--device` flags (Task 2).
 - Produces: no new API. Behaviour only.
 
 - [ ] **Step 1: Move resolution inside the device loop**
 
-Replace the block written in Task 2 Step 4 (`Renderer.cs`, from `var style = Palette.Resolve(...)` through the end of the `foreach`) with:
+Replace the current block in `Renderer.cs` — from the `Palette.ResolveFor(...)` call above the device loop through the end of the `foreach` — with:
 
 ```csharp
             var t = _clock.Elapsed.TotalSeconds;
@@ -1288,23 +1314,25 @@ Replace the block written in Task 2 Step 4 (`Renderer.cs`, from `var style = Pal
             {
                 // Styles are resolved per device, not once per tick: a device may override
                 // any field of any state, so two devices can be showing different effects.
-                var style = Palette.Resolve(cfg, d.Cfg, _current);
+                // ResolveFor takes the segment count because a spatial effect on a one-zone
+                // device resolves to breathe, and must pick up breathe's own depth floor.
+                var segs = d.Cfg.Animate ? d.Segments : 1;
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
 
                 if (fading)
                 {
-                    var prev = Palette.Resolve(cfg, d.Cfg, _previous);
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
                     style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
                     if (style.HasColor2 && prev.HasColor2)
                         style.Color2 = Rgb.Lerp(prev.Color2, style.Color2, mix);
                 }
 
-                var segs = d.Cfg.Animate ? d.Segments : 1;
                 var frame = Effects.Render(style, t, tInState, segs);
                 Emit(cfg, d, style, frame);
             }
 ```
 
-`Palette.Resolve` returns a fresh `ResolvedStyle` each call, so mutating `style.Color` for the cross-fade cannot leak between devices.
+`Palette.ResolveFor` returns a fresh `ResolvedStyle` each call, so mutating `style.Color` for the cross-fade cannot leak between devices.
 
 - [ ] **Step 2: Build**
 
@@ -1429,15 +1457,15 @@ In `Renderer.cs`, replace the `foreach` body written in Task 5 Step 1 with:
 ```csharp
             foreach (var d in snapshot)
             {
-                var style = Palette.Resolve(cfg, d.Cfg, _current);
                 var segs = d.Cfg.Animate ? d.Segments : 1;
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
                 var frame = Effects.Render(style, t, tInState, segs);
 
                 if (fading)
                 {
                     // Render the outgoing state too and blend, so motion cross-fades
                     // rather than snapping. Only inside the TransitionMs window.
-                    var prev = Palette.Resolve(cfg, d.Cfg, _previous);
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
                     var prevFrame = Effects.Render(prev, t, tInState, segs);
                     frame = Effects.Blend(prevFrame, frame, mix);
                 }
@@ -1463,7 +1491,7 @@ In `src/GoveeLights.Daemon/FrameDump.cs`, after the style is resolved and before
                     Console.Error.WriteLine("unknown --from: " + fromName);
                     return 2;
                 }
-                fromStyle = Palette.Resolve(null, null, fa);
+                fromStyle = Palette.ResolveFor(null, null, fa, segments);
             }
 ```
 
