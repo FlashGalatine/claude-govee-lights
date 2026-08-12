@@ -329,6 +329,40 @@ if (-not $exe) {
     $b = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#FFFFFF"}','--segments','1','--seconds','2')
     if (($b | Where-Object { $_ -match '^#' }) -match 'depth=0\.35') { Ok 'breathe inherits its 0.35 depth floor' }
     else { No 'breathe did not inherit its depth floor' (($b | Where-Object { $_ -match '^#' })) }
+
+    # Direction is an array transform, so reverse must be an exact mirror of forward.
+    $fwd = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"forward"}','--segments','10','--seconds','1')
+    $rev = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"reverse"}','--segments','10','--seconds','1')
+    $mirrorOk = $true
+    $fwdRows = @($fwd | Where-Object { $_ -notmatch '^#' -and $_ })
+    $revRows = @($rev | Where-Object { $_ -notmatch '^#' -and $_ })
+    if ($fwdRows.Count -ne $revRows.Count -or $fwdRows.Count -eq 0) { $mirrorOk = $false }
+    else {
+        for ($i = 0; $i -lt $fwdRows.Count; $i++) {
+            $f = $fwdRows[$i].Split(','); $r = $revRows[$i].Split(',')
+            $fc = $f[1..($f.Count-1)]; $rc = $r[1..($r.Count-1)]
+            [array]::Reverse($rc)
+            if (($fc -join '') -ne ($rc -join '')) { $mirrorOk = $false; break }
+        }
+    }
+    if ($mirrorOk) { Ok 'Direction reverse is the exact mirror of forward' }
+    else { No 'reverse is not a mirror of forward' }
+
+    # Depth must floor the output: nothing may fall below depth * colour.
+    $d = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Depth":0.5}','--segments','1','--seconds','2')
+    $dv = @($d | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        [Convert]::ToInt32($_.Split(',')[1].Substring(1,2), 16) })
+    $dmin = ($dv | Measure-Object -Minimum).Minimum
+    if ($dmin -ge 126 -and $dmin -le 129) { Ok 'Depth floors the output' "min channel $dmin" }
+    else { No 'Depth floor not applied' "min channel $dmin, expected 128" }
+
+    # Color2 replaces "scale toward black" with a blend between two colours, so the
+    # dimmest frame should be Color2 rather than near-black. Depth is pinned to 0: blink
+    # defaults to Depth 0.06, which would lift the low end off Color2 exactly.
+    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000","Depth":0}','--segments','1','--seconds','2')
+    $c2rows = @($c2 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object { $_.Split(',')[1] })
+    if (($c2rows | Sort-Object -Unique) -contains '#FF0000') { Ok 'Color2 is used as the low end of the blend' }
+    else { No 'Color2 was not blended' ($c2rows | Sort-Object -Unique) -join ' ' }
 }
 
 # --------------------------------------------------------------- housekeeping
