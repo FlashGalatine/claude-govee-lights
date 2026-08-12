@@ -310,20 +310,25 @@ if (-not $exe) {
     }
 
     # The bug this whole refactor exists to fix: an entry that sets only Hz used to be
-    # discarded wholesale because it carried no Color, silently reverting to defaults.
-    $partial = Invoke-Dump @('--style','{"Effect":"breathe","Hz":2.0,"Color":"#3366CC"}','--segments','1','--seconds','1')
-    $full    = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#3366CC"}','--segments','1','--seconds','1')
+    # discarded wholesale because it carried no Color - the deleted Palette.For guard
+    # keyed on Color being present. Neither style below sets Color, so both fall back to
+    # the same grey; any frame difference can only come from Hz being honoured. The
+    # header line is stripped from both sides first, since it echoes "hz=2" vs "hz=0.6"
+    # regardless of whether Effects.Render ever reads style.Hz.
+    $partial = @(Invoke-Dump @('--style','{"Effect":"breathe","Hz":2.0}','--segments','1','--seconds','1')) -notmatch '^#'
+    $full    = @(Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6}','--segments','1','--seconds','1')) -notmatch '^#'
     if (($partial -join "`n") -ne ($full -join "`n")) { Ok 'Hz is honoured independently of other fields' }
     else { No 'Hz had no effect' 'Partial overrides are being discarded.' }
 
-    # Depth is an inherited effect default, not a per-state one: breathe must still floor
-    # at 0.35 of the colour even though no state specifies Depth.
+    # Depth is an inherited effect default, not a per-state one: breathe's resolved style
+    # must carry Depth=0.35 even though no state specifies it. This checks the resolved
+    # header field rather than rendered brightness, since Effects.Render does not read
+    # style.Depth yet (Task 3 wires that up) - the 0.35 breathe floor in the maths today
+    # is still a literal, so measuring rendered output here would pass even if
+    # EffectDefaults's breathe entry were deleted.
     $b = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#FFFFFF"}','--segments','1','--seconds','2')
-    $vals = @($b | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
-        [Convert]::ToInt32($_.Split(',')[1].Substring(1,2), 16) })
-    $min = ($vals | Measure-Object -Minimum).Minimum
-    if ($min -ge 88 -and $min -le 91) { Ok 'breathe inherits its 0.35 depth floor' "min channel $min" }
-    else { No 'breathe depth floor is wrong' "min channel $min, expected 89" }
+    if (($b | Where-Object { $_ -match '^#' }) -match 'depth=0\.35') { Ok 'breathe inherits its 0.35 depth floor' }
+    else { No 'breathe did not inherit its depth floor' (($b | Where-Object { $_ -match '^#' })) }
 }
 
 # --------------------------------------------------------------- housekeeping

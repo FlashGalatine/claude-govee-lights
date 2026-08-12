@@ -16,7 +16,8 @@ namespace GoveeLights
 
         /// <summary>Per-device style overrides, layered over the global States map.
         /// Lets a desk strip chase while a ceiling strip only breathes.</summary>
-        public Dictionary<string, StateStyle> States { get; set; } = new Dictionary<string, StateStyle>();
+        public Dictionary<string, StateStyle> States { get; set; } =
+            new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>A partial style. null means "inherit from the layer below" - see
@@ -25,7 +26,7 @@ namespace GoveeLights
     public class StateStyle
     {
         public string  Color       { get; set; }
-        public string  Color2      { get; set; }  // null = single-colour: weight scales toward black
+        public string  Color2      { get; set; }  // null/absent = inherit; "none" = explicitly single-colour; #RRGGBB = blend from that colour
         public string  Effect      { get; set; }  // solid|breathe|pulse|blink|chase|comet|wipe|progress|sparkle|rainbow
         public double? Hz          { get; set; }
         public int?    Brightness  { get; set; }  // null = inherit; -1 = leave brightness alone
@@ -79,7 +80,8 @@ namespace GoveeLights
 
         public RenderConfig Render { get; set; } = new RenderConfig();
         public List<DeviceConfig> Devices { get; set; } = new List<DeviceConfig>();
-        public Dictionary<string, StateStyle> States { get; set; } = new Dictionary<string, StateStyle>();
+        public Dictionary<string, StateStyle> States { get; set; } =
+            new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> ToolClassMap { get; set; } = new Dictionary<string, string>();
 
         public string RestColor { get; set; } = "#FFD9A0";

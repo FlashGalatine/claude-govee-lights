@@ -53,10 +53,13 @@ namespace GoveeLights
         // every time. Nothing mutates these, so a shared instance is safe.
         static readonly Dictionary<string, StateStyle> _stateDefaults = Defaults();
 
-        /// <summary>The weakest layer, keyed by effect. These reproduce the constants
-        /// that used to be hardcoded inside each effect - breathe's 0.35 floor, pulse's
-        /// cubic shaping and 0.08 floor - so that expressing them as modifiers changes
-        /// no output.</summary>
+        /// <summary>The weakest layer, keyed by effect. Only breathe, pulse, blink and
+        /// sparkle get an entry here - their floors rescale linearly into [Depth, 1], so
+        /// expressing them as a Depth modifier changes no output. Chase and comet keep
+        /// their own falloff/tail shapes hardcoded in Effects (chase's 0.45/0.12/0.02
+        /// steps, comet's Math.Max(0.02, ...) exponential decay) and are given Depth = 0
+        /// here deliberately: neither shape is a simple rescale into [Depth, 1], so do
+        /// not try to derive them from this table.</summary>
         static StateStyle EffectDefaults(string effect)
         {
             switch (effect)
@@ -103,8 +106,10 @@ namespace GoveeLights
             r.Effect = effect;
             r.Color  = Rgb.Parse(Pick(all, x => x.Color), new Rgb(120, 120, 120));
 
+            // "none" is an explicit clear: without it, a stronger layer could never
+            // revert an inherited Color2 back to single-colour once a weaker layer sets it.
             var c2 = Pick(all, x => x.Color2);
-            r.HasColor2 = !string.IsNullOrEmpty(c2);
+            r.HasColor2 = !string.IsNullOrEmpty(c2) && !string.Equals(c2, "none", StringComparison.OrdinalIgnoreCase);
             r.Color2 = r.HasColor2 ? Rgb.Parse(c2, new Rgb(0, 0, 0)) : new Rgb(0, 0, 0);
 
             r.Hz = PickN(all, x => x.Hz, 0.6);
