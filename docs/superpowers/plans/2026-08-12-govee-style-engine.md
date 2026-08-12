@@ -1571,7 +1571,7 @@ outside the effect, they work on all of them the same way.
 | Field | Type | Meaning |
 |---|---|---|
 | `Color` | `#RRGGBB` | The primary colour. |
-| `Color2` | `#RRGGBB` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. |
+| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. |
 | `Effect` | name | See the table below. |
 | `Hz` | number | Rate. Cycles per second for time-based effects; twinkle steps per second for `sparkle`. |
 | `Brightness` | 0–100 | Device brightness. `-1` leaves it alone. |
