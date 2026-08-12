@@ -228,6 +228,84 @@ if (Test-Path $programCs) {
     }
 } else { No 'Program.cs exists' $programCs }
 
+# ------------------------------------------------------- effects engine
+Section 'Effects engine'
+# Effects is pure and deterministic, so CI can assert on real render output with no
+# hardware. The goldens are the regression net for the pipeline refactor: any change
+# to the six original effects' output is a bug unless it is deliberate.
+$exe = @(
+    (Join-Path $root 'dist/daemon/GoveeLightsDaemon.exe'),
+    (Join-Path $root 'src/GoveeLights.Daemon/bin/Release/net48/GoveeLightsDaemon.exe'),
+    (Join-Path $root 'src/GoveeLights.Daemon/bin/Debug/net48/GoveeLightsDaemon.exe')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+function Quote-DumpArg([string] $a) {
+    # Start-Process's array-form -ArgumentList does not escape embedded double quotes
+    # (Windows PowerShell 5.1 joins the array with spaces and lets CreateProcess's
+    # argv parser see the raw '"' characters), which corrupts the JSON --style payload
+    # before the daemon ever reads it. Build the command line by hand instead.
+    if ($a -match '[\s"]') { return '"' + ($a -replace '"', '\"') + '"' }
+    return $a
+}
+
+function Invoke-Dump {
+    param([string[]] $DumpArgs)
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        # Start-Process, not '&': the daemon is a WinExe, so stdout must be explicitly
+        # redirected for the parent to see anything.
+        $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
+        Start-Process -FilePath $exe -ArgumentList $cmdLine `
+            -NoNewWindow -Wait -RedirectStandardOutput $tmp | Out-Null
+        return @(Get-Content $tmp)
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+
+if (-not $exe) {
+    Write-Host '  SKIP  no build output found (run scripts\Build.ps1)' -ForegroundColor DarkGray
+} else {
+    $effects = @('solid','breathe','pulse','blink','chase','comet')
+
+    # Renders at all three segment shapes: 1 (whole-device), 3 (short strip), 10 (typical).
+    foreach ($e in $effects) {
+        $bad = $false
+        foreach ($n in 1, 3, 10) {
+            $lines = Invoke-Dump @('--style', "{`"Color`":`"#3366CC`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                                   '--segments', "$n", '--seconds', '0.4')
+            $rows = @($lines | Where-Object { $_ -notmatch '^#' -and $_ })
+            if ($rows.Count -lt 1) { $bad = $true; break }
+            foreach ($r in $rows) {
+                $cells = $r.Split(',')[1..($r.Split(',').Count - 1)]
+                # Whole-device effects (solid/breathe/pulse/blink) render one Solid cell
+                # regardless of segment count - Effects.Whole() deliberately skips the
+                # segment array because DeviceColorControl is cheaper for uniform colour.
+                # Only chase/comet, which paint per segment, must match $n exactly.
+                if ($cells.Count -ne $n -and $cells.Count -ne 1) { $bad = $true; break }
+                foreach ($c in $cells) { if ($c -notmatch '^#[0-9A-F]{6}$') { $bad = $true; break } }
+            }
+        }
+        if ($bad) { No "$e renders at 1, 3 and 10 segments" } else { Ok "$e renders at 1, 3 and 10 segments" }
+    }
+
+    # Determinism. Without it the goldens below are meaningless and sparkle (Task 4)
+    # would strobe differently on every frame.
+    $a = Invoke-Dump @('--style','{"Color":"#3366CC","Effect":"chase","Hz":0.6}','--segments','10','--seconds','1')
+    $b = Invoke-Dump @('--style','{"Color":"#3366CC","Effect":"chase","Hz":0.6}','--segments','10','--seconds','1')
+    if (($a -join "`n") -eq ($b -join "`n")) { Ok 'identical inputs produce identical frames' }
+    else { No 'render output is not deterministic' 'Goldens and sparkle both depend on this.' }
+
+    # Goldens.
+    foreach ($e in $effects) {
+        $goldenPath = Join-Path $root "tests/golden/$e.csv"
+        if (-not (Test-Path $goldenPath)) { No "golden exists for $e" $goldenPath; continue }
+        $got = Invoke-Dump @('--style', "{`"Color`":`"#3366CC`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                             '--segments','10','--seconds','4','--fps','25')
+        $want = @(Get-Content $goldenPath)
+        if (($got -join "`n") -eq ($want -join "`n")) { Ok "$e matches its golden frames" }
+        else { No "$e output changed" "Compare against tests/golden/$e.csv" }
+    }
+}
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
