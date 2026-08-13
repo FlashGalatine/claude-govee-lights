@@ -97,7 +97,8 @@ namespace GoveeLights
             // useless unless the render roster is rebuilt from it.
             _govee.DevicesLoaded = () => _renderer.SyncDevices();
 
-            StyleRoutes.Init(Cfg, _styles, configPath, () => SuppressWatch(3000));
+            StyleRoutes.Init(Cfg, _styles, configPath, () => SuppressWatch(3000),
+                             (a, ms) => _renderer.Force(a, ms));
 
             // Bind before anything else observable: a second instance must lose here.
             _http = new MiniHttpServer(_cfg.Port, Handle);
@@ -185,6 +186,10 @@ namespace GoveeLights
                 case "/styles/reset": return StyleRoutes.Reset(req);
                 case "/styles/save": return StyleRoutes.Save(req);
                 case "/styles/revert": return StyleRoutes.Revert(req);
+                case "/themes": return StyleRoutes.ThemeList(req);
+                case "/themes/apply": return StyleRoutes.ThemeApply(req);
+                case "/themes/save": return StyleRoutes.ThemeSave(req);
+                case "/preview": return StyleRoutes.Preview(req);
                 default:
                     return HttpResponse.Text(404, "no such endpoint");
             }

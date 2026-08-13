@@ -902,7 +902,7 @@ if (-not $exe) {
         }
         $themeEffectsBad = @()
         foreach ($t in @('default','muted','vivid','mono')) {
-            $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t)
+            $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t, '--themes-dir', $themesScratch)
             $rows = @($cap.StdOut | Where-Object { $_ -and $_ -notlike 'state,*' })
             if ($cap.ExitCode -ne 0 -or $rows.Count -ne $stateCount) {
                 $themeEffectsBad += "$t (did not resolve: exit=$($cap.ExitCode) rows=$($rows.Count))"
