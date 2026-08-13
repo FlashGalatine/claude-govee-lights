@@ -1,0 +1,13 @@
+{
+  "_comment": "Drives the single-zone spatial fallback check in scripts/Test-Repo.ps1. Pure white so the rendered channel value IS the resolved weight * 255, which makes breathe's 0.35 depth floor (89) directly observable instead of only visible in the header.",
+  "Enabled": true,
+  "ApiGuid": "00000000-0000-0000-0000-000000000000",
+  "Port": 17321,
+  "States": {
+    "ToolRead": { "Color": "#FFFFFF", "Effect": "chase", "Hz": 0.6 },
+    "ToolAgent": { "Color": "#FFFFFF", "Effect": "comet", "Hz": 0.6 }
+  },
+  "Devices": [
+    { "Name": "OneZone", "Segments": 1 }
+  ]
+}

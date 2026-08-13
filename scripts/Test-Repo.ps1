@@ -277,9 +277,9 @@ if (-not $exe) {
             if ($rows.Count -lt 1) { $bad = $true; break }
             foreach ($r in $rows) {
                 $cells = $r.Split(',')[1..($r.Split(',').Count - 1)]
-                # chase and comet paint per segment; the rest render one whole-device cell via
-                # Effects.Whole(), which deliberately skips the segment array because
-                # DeviceColorControl is cheaper for uniform colour. Spatial effects fall back to
+                # chase and comet paint per segment; the rest return a length-1 weight array,
+                # which makes Effects.ToFrame emit a whole-device colour and skip the segment
+                # array because DeviceColorControl is cheaper for uniform colour. Spatial effects fall back to
                 # breathe at one segment, so they collapse to a single cell there too.
                 # This is "paints per segment", which is deliberately not the same list as
                 # Palette.IsSpatial: sparkle paints per segment but is not spatial, because at
@@ -331,6 +331,71 @@ if (-not $exe) {
     $b = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#FFFFFF"}','--segments','1','--seconds','2')
     if (($b | Where-Object { $_ -match '^#' }) -match 'depth=0\.35') { Ok 'breathe inherits its 0.35 depth floor' }
     else { No 'breathe did not inherit its depth floor' (($b | Where-Object { $_ -match '^#' })) }
+
+    # ---- the single-zone spatial fallback ------------------------------------------
+    # The one regression this branch has already produced - a spatial effect hard-cutting
+    # a one-zone device to black - had no test. The n=1 arm of the render sweep above
+    # asserts only cell count and hex validity, and an all-#000000 frame satisfies both.
+    # The depth-floor check immediately above passes an explicit {"Effect":"breathe"}, so
+    # it exercises EffectDefaults, not the fallback. And every golden is --segments 10.
+    #
+    # Both halves are asserted deliberately:
+    #   * header effect=breathe - fails if the fallback is removed outright.
+    #   * min channel >= 80     - fails if the fallback renames the effect but loses the
+    #                             depth layer (e.g. stamping r.Effect="breathe" onto the
+    #                             already-resolved style instead of re-resolving through
+    #                             EffectDefaults). That variant still prints
+    #                             "effect=breathe" while rendering down to #000000, which
+    #                             is precisely the bug that shipped, so the header alone
+    #                             cannot catch it.
+    #   * max channel >= 250    - fails if the fallback pins output flat at the floor
+    #                             rather than breathing between floor and full.
+    # Colour is pure white so the rendered channel value IS weight * 255: 0.35 * 255 = 89.
+    function Get-MinMaxChannel($lines) {
+        $v = @($lines | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+            [Convert]::ToInt32($_.Split(',')[1].Substring(1, 2), 16) })
+        if ($v.Count -eq 0) { return @(-1, -1) }
+        return @(($v | Measure-Object -Minimum).Minimum, ($v | Measure-Object -Maximum).Maximum)
+    }
+
+    foreach ($e in 'chase', 'comet', 'wipe', 'progress', 'rainbow') {
+        $sz = Invoke-Dump @('--style', "{`"Color`":`"#FFFFFF`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                            '--segments', '1', '--seconds', '2')
+        $szHeader = @($sz | Where-Object { $_ -match '^#' })
+        $szRange = Get-MinMaxChannel $sz
+        if (($szHeader -match 'effect=breathe') -and ($szHeader -match 'depth=0\.35') -and
+            $szRange[0] -ge 80 -and $szRange[1] -ge 250) {
+            Ok "$e falls back to breathe with its depth floor at one segment" "min $($szRange[0]), max $($szRange[1])"
+        } else {
+            No "$e single-zone fallback is wrong" "header=$szHeader min=$($szRange[0]) (want >= 80) max=$($szRange[1]) (want >= 250)"
+        }
+    }
+
+    # ...and the fallback must NOT fire once there is a strip to paint on. Without this,
+    # a resolve that unconditionally forced breathe would pass every check above.
+    $szWide = @(Invoke-Dump @('--style','{"Color":"#FFFFFF","Effect":"chase","Hz":0.6}','--segments','10','--seconds','0.2') |
+                Where-Object { $_ -match '^#' })
+    if ($szWide -match 'effect=chase') { Ok 'a spatial effect is left alone at 10 segments' }
+    else { No 'the single-zone fallback fired at 10 segments' $szWide }
+
+    # The two checks above go through Palette.ResolveStyleFor (the --style path). The
+    # renderer uses Palette.ResolveFor, so drive that path too - a fallback wired into one
+    # entry point but not the other is exactly the shape of the defect this replaces.
+    # --device also proves the device layer does not defeat it.
+    $szFixture = Join-Path $root 'tests/fixtures/single-zone-spatial.json'
+    function Test-ConfiguredFallback([string] $State, [string[]] $Extra) {
+        $lines = Invoke-Dump (@('--config', $szFixture, '--state', $State, '--segments', '1', '--seconds', '2') + $Extra)
+        $header = @($lines | Where-Object { $_ -match '^#' })
+        $range = Get-MinMaxChannel $lines
+        if (($header -match 'effect=breathe') -and ($header -match 'depth=0\.35') -and
+            $range[0] -ge 80 -and $range[1] -ge 250) {
+            Ok "a configured spatial state falls back to breathe at one segment ($State)" "min $($range[0]), max $($range[1])"
+        } else {
+            No "configured single-zone fallback is wrong ($State)" "header=$header min=$($range[0]) max=$($range[1])"
+        }
+    }
+    Test-ConfiguredFallback -State 'ToolRead'  -Extra @()
+    Test-ConfiguredFallback -State 'ToolAgent' -Extra @('--device', 'OneZone')
 
     # Direction is an array transform, so reverse must be an exact mirror of forward. A
     # field-count guard and a genuine-difference check keep this from passing vacuously
@@ -523,7 +588,12 @@ if (-not $exe) {
     if (($ceiling | Where-Object { $_ -match '^#' }) -match 'color=#3366CC') { Ok 'device override inherits unset fields' }
     else { No 'device override did not inherit Color' ($ceiling | Where-Object { $_ -match '^#' }) }
 
-    if (($desk | Where-Object { $_ -match '^#' }) -match 'effect=breathe') { Ok 'a device with no override uses the global style' }
+    # Assert the COLOUR, not the effect. The fixture's global States.Thinking sets
+    # breathe and so does the built-in Palette.Defaults()["Thinking"], so 'effect=breathe'
+    # here is satisfied by deleting the config layer entirely - it cannot fail for the
+    # reason it names. The colours differ (#3366CC config vs #7B4DFF built-in), so this
+    # form genuinely separates the two layers.
+    if (($desk | Where-Object { $_ -match '^#' }) -match 'color=#3366CC') { Ok 'a device with no override uses the global style' }
     else { No 'unoverridden device did not use the global style' ($desk | Where-Object { $_ -match '^#' }) }
 
     # A blend must start at the outgoing frame and end at the incoming one.
@@ -563,6 +633,15 @@ if (-not $exe) {
     $spMidUniqueCells = @($spMidCells[1..10] | Sort-Object -Unique).Count
     if ($spMidUniqueCells -gt 1) { Ok 'blend midpoint cells vary across the segment array' }
     else { No 'blend midpoint cells are uniform' 'Segments may have been broadcast from Solid instead of blended per-cell.' }
+
+    # ...and the midpoint must not simply BE the incoming frame. The two checks above are
+    # both satisfied by a Blend that returns b outright: ToolAgent's comet frame already
+    # has 11 columns and already varies cell to cell. Comparing against a pure --state
+    # ToolAgent dump at the same row index is what makes 'return b' go red.
+    $spPure = @(Invoke-Dump @('--state','ToolAgent','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $spMidIdx = [int]($spBlend.Count / 2)
+    if ($spBlend[$spMidIdx] -ne $spPure[$spMidIdx]) { Ok 'spatial blend midpoint is not simply the incoming frame' }
+    else { No 'spatial blend midpoint equals the pure incoming frame' 'Blend may be returning b outright for segment arrays.' }
 }
 
 # Shipping an example config that names an effect the engine does not implement
