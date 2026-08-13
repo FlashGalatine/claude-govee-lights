@@ -309,6 +309,13 @@ namespace GoveeLights
                 // for the fresh start a themed state is supposed to get.
                 _styles.Revert();
                 _styles.ResetAll(_cfg());
+
+                // If every state in the theme fails validation, Revert + ResetAll above have
+                // already run and the loop below applies nothing - degenerating to "wipe
+                // everything to built-in" while still answering 200 ok. Count what actually
+                // lands and refuse the same way the empty-States case above does when that
+                // count is zero, instead of quietly succeeding at doing nothing useful.
+                var appliedCount = 0;
                 foreach (var kv in t.States)
                 {
                     // IsDefined, not just TryParse: a hand-edited theme file's State key is
@@ -332,7 +339,17 @@ namespace GoveeLights
                         continue;
                     }
                     _styles.Set(a.ToString(), kv.Value);
+                    appliedCount++;
                 }
+
+                // Every state in the theme was unusable: the Revert()+ResetAll() above still
+                // ran (nothing to undo it back to - neither call snapshots what pending held
+                // before), so this genuinely did wipe prior edits to built-in defaults. That
+                // is unavoidable without a snapshot/restore this file has no primitive for;
+                // what this closes is the 200 that claimed the theme applied when nothing in
+                // it actually did.
+                if (appliedCount == 0)
+                    return HttpResponse.Text(400, "theme '" + t.Name + "' has no valid states to apply");
             }
 
             Log.Info("theme_applied", t.Name);
@@ -381,7 +398,7 @@ namespace GoveeLights
             if (!Themes.TrySave(name, states, out err)) return HttpResponse.Text(500, "theme save failed: " + err);
 
             Log.Info("theme_saved", name);
-            return HttpResponse.Json("{\"ok\":true}");
+            return HttpResponse.Json("{\"ok\":true,\"saved\":true}");
         }
 
         public static HttpResponse Preview(HttpRequest req)
