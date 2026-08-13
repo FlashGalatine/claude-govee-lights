@@ -27,28 +27,44 @@ namespace GoveeLights
             if (json == null) { error = "no config text"; return false; }
 
             int keyStart, valueStart, valueEnd, indent;
-            if (FindTopLevelStates(json, out keyStart, out valueStart, out valueEnd, out indent))
+            string nonObjectValue;
+            if (FindTopLevelStates(json, out keyStart, out valueStart, out valueEnd, out indent, out nonObjectValue))
             {
                 result = json.Substring(0, valueStart) + statesBlock + json.Substring(valueEnd);
                 return true;
             }
 
-            // No States key: insert one before the final closing brace.
-            var close = json.LastIndexOf('}');
-            if (close < 0) { error = "config has no closing brace"; return false; }
+            if (nonObjectValue != null)
+            {
+                // The key exists but is not something we can safely replace - null, an
+                // array, a string, a number, a boolean, or an unterminated object. That is
+                // not "no key", and treating it as one would append a second "States"
+                // member; JavaScriptSerializer would keep one and silently discard the
+                // other. The class's whole promise is "leave every other byte alone, or
+                // refuse" - never guess.
+                error = "top-level \"States\" is " + nonObjectValue + ", not an object; refusing to guess";
+                return false;
+            }
 
-            var head = json.Substring(0, close).TrimEnd();
+            // No States key at all: insert one before the final closing brace.
+            string head; int close;
+            if (!TryFindInsertPrefix(json, out head, out close))
+            { error = "config has no closing brace"; return false; }
+
             var sep = head.EndsWith("{") ? "" : ",";
             result = head + sep + "\n  \"States\": " + statesBlock + "\n" + json.Substring(close);
             return true;
         }
 
         /// <summary>Locate the depth-1 "States" member. valueStart/valueEnd bracket its
-        /// object value; indent is the column its key started at.</summary>
+        /// object value; indent is the column its key started at. Returns false both when
+        /// there is no such key at all (nonObjectValue stays null) and when there is one
+        /// but its value is not an object we can splice into (nonObjectValue names what it
+        /// found) - callers must tell those two apart.</summary>
         static bool FindTopLevelStates(string json, out int keyStart, out int valueStart,
-                                       out int valueEnd, out int indent)
+                                       out int valueEnd, out int indent, out string nonObjectValue)
         {
-            keyStart = valueStart = valueEnd = -1; indent = 2;
+            keyStart = valueStart = valueEnd = -1; indent = 2; nonObjectValue = null;
 
             int depth = 0, i = 0, lineStart = 0;
             bool inStr = false, esc = false;
@@ -69,14 +85,21 @@ namespace GoveeLights
                         if (j < json.Length && json[j] == ':')
                         {
                             j = SkipWhitespace(json, j + 1);
+                            keyStart = i;
                             if (j < json.Length && json[j] == '{')
                             {
-                                keyStart = i;
                                 valueStart = j;
                                 valueEnd = MatchBrace(json, j);
                                 indent = i - lineStart;
-                                return valueEnd > 0;
+                                if (valueEnd > 0) return true;
+
+                                nonObjectValue = "an unterminated object";
+                                return false;
                             }
+
+                            // The key exists but is not an object.
+                            nonObjectValue = DescribeJsonValue(json, j);
+                            return false;
                         }
                     }
                     inStr = true; i++; continue;
@@ -90,6 +113,20 @@ namespace GoveeLights
                 i++;
             }
             return false;
+        }
+
+        /// <summary>Name what sits at position i in the JSON text, for the refusal message
+        /// when a top-level "States" is not an object.</summary>
+        static string DescribeJsonValue(string json, int i)
+        {
+            if (i >= json.Length) return "missing a value";
+            var c = json[i];
+            if (c == 'n') return "null";
+            if (c == '[') return "an array";
+            if (c == '"') return "a string";
+            if (c == 't' || c == 'f') return "a boolean";
+            if (c == '-' || (c >= '0' && c <= '9')) return "a number";
+            return "not an object";
         }
 
         static bool MatchesKey(string json, int quoteIndex, string key)
@@ -123,6 +160,19 @@ namespace GoveeLights
             return -1;
         }
 
+        /// <summary>Where the "insert a new States key" path draws the line: everything up
+        /// to (and including trailing-whitespace trimming of) the final '}' is kept as
+        /// `head`; everything from `close` onward is kept verbatim. Shared by
+        /// TrySpliceStates (which builds the result this way) and TrySave (which verifies
+        /// the result was actually built this way) so the two cannot drift on what
+        /// "unchanged" means.</summary>
+        static bool TryFindInsertPrefix(string json, out string head, out int close)
+        {
+            close = json.LastIndexOf('}');
+            head = close >= 0 ? json.Substring(0, close).TrimEnd() : null;
+            return close >= 0;
+        }
+
         /// <summary>Render a States block at the file's own 2-space convention.</summary>
         public static string RenderStates(Dictionary<string, StateStyle> states, int indentSpaces)
         {
@@ -150,9 +200,7 @@ namespace GoveeLights
         }
 
         /// <summary>A style is worth writing when it is non-null and says at least one
-        /// thing. Shared by RenderStates (what actually gets written) and TrySave's
-        /// round-trip count (what we expect to find after writing) so the two can never
-        /// drift apart - see the bug note below.</summary>
+        /// thing.</summary>
         static bool Writable(StateStyle s, out string body)
         {
             body = null;
@@ -173,6 +221,21 @@ namespace GoveeLights
             return ser.Serialize(keep);
         }
 
+        /// <summary>Read a file's text while remembering whether it had a byte-order mark,
+        /// so a save can write the same encoding back. File.ReadAllText silently absorbs a
+        /// BOM; writing plain UTF-8 (or UTF-8-with-BOM) back over a file that was the other
+        /// way would change bytes outside the States block - exactly what this class
+        /// promises not to do.</summary>
+        static string ReadAllTextPreservingEncoding(string path, out Encoding encoding)
+        {
+            using (var reader = new StreamReader(path, new UTF8Encoding(false), true))
+            {
+                var text = reader.ReadToEnd();
+                encoding = reader.CurrentEncoding;
+                return text;
+            }
+        }
+
         /// <summary>Splice, validate by round-trip, then replace atomically. Returns false
         /// and writes nothing if anything looks wrong - a splicer that silently corrupts a
         /// config is worse than one that refuses.</summary>
@@ -181,45 +244,83 @@ namespace GoveeLights
             error = null;
             try
             {
-                var original = File.ReadAllText(path);
+                Encoding encoding;
+                var original = ReadAllTextPreservingEncoding(path, out encoding);
 
                 // Reuse the existing key's column so a save does not reformat the file.
                 // FindTopLevelStates leaves indent at its default of 2 when there is no
                 // States key yet, which is the right column for an inserted one.
                 int ks, vs, ve, indent;
-                FindTopLevelStates(original, out ks, out vs, out ve, out indent);
+                string nonObjectValue;
+                var hadKey = FindTopLevelStates(original, out ks, out vs, out ve, out indent, out nonObjectValue);
+
+                var block = RenderStates(states, indent);
 
                 string spliced;
-                if (!TrySpliceStates(original, RenderStates(states, indent), out spliced, out error))
+                if (!TrySpliceStates(original, block, out spliced, out error))
                     return false;
 
-                // Round-trip: the result must parse, and must carry exactly the states we
-                // meant to write.
+                // 1. The result must parse.
                 var ser = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
                 DaemonConfig check;
                 try { check = ser.Deserialize<DaemonConfig>(spliced); }
                 catch (Exception ex) { error = "spliced config does not parse: " + ex.Message; return false; }
                 if (check == null) { error = "spliced config deserialized to null"; return false; }
 
-                var wrote = check.States ?? new Dictionary<string, StateStyle>();
-
-                // Counted with the same Writable predicate RenderStates filters by - not
-                // just "non-null" - or an all-null style (serialises to "{}" and is
-                // skipped by RenderStates) would make wanted overcount and every save with
-                // one in it fail the round-trip check below.
-                var wanted = 0;
-                foreach (var kv in states) { string b; if (Writable(kv.Value, out b)) wanted++; }
-                if (wrote.Count != wanted)
+                // 2. What actually landed must re-render to exactly the block we meant to
+                // write - not merely the same entry count. A splice that hit the wrong
+                // location (or dropped/altered a value) leaves check.States holding
+                // something else, and re-rendering it would not reproduce `block` byte for
+                // byte. Reusing RenderStates on both sides also means the Writable filter
+                // that decides what gets written cannot drift from what this check expects
+                // - there is only one copy of that decision.
+                var wroteBlock = RenderStates(check.States ?? new Dictionary<string, StateStyle>(), indent);
+                if (wroteBlock != block)
                 {
-                    error = "round-trip mismatch: wrote " + wrote.Count + ", expected " + wanted;
+                    error = "round-trip mismatch: the written States block does not match what was spliced in";
                     return false;
                 }
 
+                // 3. Every byte outside the replaced span must be untouched - preserving
+                // them is this class's entire reason to exist instead of a re-serialise.
+                if (hadKey)
+                {
+                    if (spliced.Substring(0, vs) != original.Substring(0, vs) ||
+                        spliced.Substring(vs + block.Length) != original.Substring(ve))
+                    {
+                        error = "round-trip mismatch: bytes outside the States block changed";
+                        return false;
+                    }
+                }
+                else
+                {
+                    string head; int close;
+                    if (!TryFindInsertPrefix(original, out head, out close) ||
+                        !spliced.StartsWith(head, StringComparison.Ordinal) ||
+                        !spliced.EndsWith(original.Substring(close), StringComparison.Ordinal))
+                    {
+                        error = "round-trip mismatch: bytes around the inserted States block changed";
+                        return false;
+                    }
+                }
+
                 var tmp = path + ".tmp";
-                File.WriteAllText(tmp, spliced);
-                if (File.Exists(path)) File.Replace(tmp, path, null);
-                else File.Move(tmp, path);
-                return true;
+                try
+                {
+                    File.WriteAllText(tmp, spliced, encoding);
+                    if (File.Exists(path)) File.Replace(tmp, path, null);
+                    else File.Move(tmp, path);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    // Don't leave a stray .tmp beside the user's config if the final
+                    // replace/move step itself throws - a locked file, an antivirus scan
+                    // mid-flight.
+                    try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best effort */ }
+                    error = ex.Message;
+                    return false;
+                }
             }
             catch (Exception ex) { error = ex.Message; return false; }
         }

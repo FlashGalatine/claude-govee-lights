@@ -708,10 +708,47 @@ if (-not $exe) {
         return (Invoke-Dump @('--splice-states', '--config', $p, '--states', $StatesJson)) -join "`n"
     }
 
+    # For fixtures that must be refused rather than spliced: Invoke-Dump only surfaces
+    # stdout, which is exactly empty on a refusal, so this captures exit code and stderr
+    # too - a refusal that isn't observably different from success is not a refusal.
+    function Invoke-SpliceExpectFailure {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        $tmpOut = [System.IO.Path]::GetTempFileName()
+        $tmpErr = [System.IO.Path]::GetTempFileName()
+        try {
+            $cmdLine = ((@('--dump-frames', '--splice-states', '--config', $p, '--states', $StatesJson)) |
+                        ForEach-Object { Quote-DumpArg $_ }) -join ' '
+            $proc = Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait -PassThru `
+                -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+            return [PSCustomObject]@{
+                ExitCode = $proc.ExitCode
+                StdOut   = (Get-Content $tmpOut -Raw)
+                StdErr   = (Get-Content $tmpErr -Raw)
+            }
+        } finally { Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
+    }
+
+    # Routes --splice-states through ConfigWriter.TrySave (via --out) against a scratch
+    # copy, instead of the dry-run TrySpliceStates-only path every check above uses. Only
+    # this path exercises TrySave's own round-trip guard, atomic replace, and its use of
+    # the target file's own indentation.
+    function Invoke-SpliceToFile {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        $outPath = Join-Path ([System.IO.Path]::GetTempPath()) ("splice-out-" + [Guid]::NewGuid().ToString("N") + ".json")
+        try {
+            $lines = Invoke-Dump @('--splice-states', '--config', $p, '--states', $StatesJson, '--out', $outPath)
+            return ($lines -join "`n")
+        } finally { Remove-Item $outPath -ErrorAction SilentlyContinue }
+    }
+
     $newStates = '{"Thinking":{"Color":"#ABCDEF"}}'
 
     $r = Invoke-Splice 'splice-comments.json' $newStates
-    if ($r -match 'KEEP ME' -and $r -match 'KEEP ME TOO' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+    # Match the closing quote too: "KEEP ME TOO" contains "KEEP ME" as a substring, so an
+    # unquoted match would pass even if the leading comment were deleted outright.
+    if ($r -match '"KEEP ME"' -and $r -match 'KEEP ME TOO' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
         Ok 'splice preserves comments either side of States'
     } else { No 'splice lost a comment or missed the block' $r }
 
@@ -735,11 +772,15 @@ if (-not $exe) {
         Ok 'splice inserts a States block when none exists'
     } else { No 'splice failed to insert States' $r }
 
-    # A string VALUE containing the text "States": must not be mistaken for the key.
+    # A string VALUE containing the text "States": must not be mistaken for the key. The
+    # fixture's comment carries an odd number of escaped quotes before the trap, so
+    # deleting the scanner's esc handling flips its inStr parity right where the fake key
+    # sits - "notmatch #111111" is what tells "replaced in place" apart from "old block
+    # left, new one inserted elsewhere", which the other three checks alone would miss.
     $r = Invoke-Splice 'splice-stringtrap.json' $newStates
     $parsed3 = $null
     try { $parsed3 = $r | ConvertFrom-Json } catch { }
-    if ($parsed3 -and $parsed3.States.Thinking.Color -eq '#ABCDEF' -and
+    if ($parsed3 -and $parsed3.States.Thinking.Color -eq '#ABCDEF' -and $r -notmatch '#111111' -and
         $parsed3._comment -match 'must not be spliced') {
         Ok 'splice ignores a "States": inside a string value'
     } else { No 'splice was fooled by a string literal' $r }
@@ -752,6 +793,34 @@ if (-not $exe) {
         try { (Invoke-Splice $f $newStates) | ConvertFrom-Json | Out-Null } catch { $allValid = $false }
     }
     if ($allValid) { Ok 'every spliced fixture is valid JSON' } else { No 'a spliced fixture is not valid JSON' }
+
+    # A depth-1 "States" whose value is not an object (null, here) is not "no key" - that
+    # would make TrySpliceStates append a second "States" member, which
+    # JavaScriptSerializer resolves by silently keeping one and discarding the other. It
+    # must refuse instead: no stdout, a non-zero exit, and an error naming what it found.
+    $nullRes = Invoke-SpliceExpectFailure 'splice-nullstates.json' $newStates
+    if ($nullRes.ExitCode -ne 0 -and [string]::IsNullOrEmpty($nullRes.StdOut) -and
+        $nullRes.StdErr -match 'States' -and $nullRes.StdErr -match 'null') {
+        Ok 'splice refuses a top-level "States": null rather than inserting a duplicate key'
+    } else { No 'splice mishandled "States": null' ($nullRes | Out-String) }
+
+    # ---- TrySave, exercised for real -----------------------------------------
+    # Every check above only drives TrySpliceStates/RenderStates through the dry-run
+    # path. Nothing yet has ever called TrySave, so its round-trip guard, its atomic
+    # replace, and its use of the target file's own indentation (hardcoded to 2 above)
+    # are guarded by nothing that runs. --out closes that.
+    $rOut = Invoke-SpliceToFile 'splice-comments.json' $newStates
+    if ($rOut -match '"KEEP ME"' -and $rOut -match 'KEEP ME TOO' -and $rOut -match '#ABCDEF' -and $rOut -notmatch '#111111') {
+        Ok 'TrySave round-trips through --out and preserves comments'
+    } else { No 'TrySave via --out lost a comment or missed the block' $rOut }
+
+    # A 4-space-indented file must come back 4-space-indented, not the 2 the dry-run path
+    # above hardcodes - this is what makes the indent-preservation logic real rather than
+    # merely coincident with every other fixture happening to be 2-space.
+    $rIndent = Invoke-SpliceToFile 'splice-indent4.json' $newStates
+    if ($rIndent -match '(?m)^      "Thinking":' -and $rIndent -match '#ABCDEF' -and $rIndent -notmatch '#111111') {
+        Ok 'TrySave preserves a 4-space file''s own indentation'
+    } else { No 'TrySave via --out did not preserve 4-space indentation' $rIndent }
 
     # ---- Merged() coverage gap ----------------------------------------------
     # StyleStore.Merged is what save actually feeds RenderStates, and it had no direct

@@ -237,7 +237,12 @@ namespace GoveeLights
         /// alongside the clears, and what gets spliced in is store.Merged(cfg). That is
         /// the only way to exercise "cleared and also patched" end-to-end - Merged is
         /// what save actually feeds RenderStates, and TrySpliceStates alone cannot express
-        /// "drop the config entry, then merge a patch onto nothing" the way Merged does.</summary>
+        /// "drop the config entry, then merge a patch onto nothing" the way Merged does.
+        ///
+        /// --out <path> routes the same states through ConfigWriter.TrySave against a
+        /// scratch copy at that path instead of printing a dry-run splice. Without it,
+        /// nothing ever calls TrySave: its round-trip guard, its atomic replace, and its
+        /// use of the target file's own indentation all go untested.</summary>
         static int SpliceStates(string[] args)
         {
             var configPath = Arg(args, "--config", null);
@@ -276,6 +281,23 @@ namespace GoveeLights
             else
             {
                 states = parsed;
+            }
+
+            var outPath = Arg(args, "--out", null);
+            if (!string.IsNullOrEmpty(outPath))
+            {
+                try { File.Copy(configPath, outPath, true); }
+                catch (Exception ex) { Console.Error.WriteLine("could not stage --out: " + ex.Message); return 2; }
+
+                string saveError;
+                if (!ConfigWriter.TrySave(outPath, states, out saveError))
+                {
+                    Console.Error.WriteLine("save failed: " + saveError);
+                    return 2;
+                }
+                Console.Out.Write(File.ReadAllText(outPath));
+                Console.Out.Flush();
+                return 0;
             }
 
             var original = File.ReadAllText(configPath);
