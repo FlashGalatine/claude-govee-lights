@@ -6,7 +6,7 @@
     .\Govee-Cli.ps1 status
     .\Govee-Cli.ps1 test ToolShell
     .\Govee-Cli.ps1 off
-    .\Govee-Cli.ps1 set Thinking --color #FF0000 --hz 2
+    .\Govee-Cli.ps1 set Thinking --color FF0000 --hz 2
     .\Govee-Cli.ps1 theme apply muted
 #>
 [CmdletBinding()]
@@ -19,6 +19,19 @@ param(
 $ErrorActionPreference = 'Continue'
 $base = "http://127.0.0.1:$Port"
 $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+
+# Numbers that came back from the daemon (Hz, Tail, Depth, FullSeconds) must print the
+# same way they are parsed - a bare "$($r.hz)" interpolation formats with the *current*
+# culture, so 0.8 would render as "0,8" on a comma-decimal system even though only "0.8"
+# is ever accepted as input.
+function Format-Invariant($value) {
+    if ($null -eq $value) { return '' }
+    if ($value -is [double] -or $value -is [single] -or $value -is [decimal] -or `
+        $value -is [int] -or $value -is [long]) {
+        return $value.ToString($InvariantCulture)
+    }
+    return "$value"
+}
 
 # Style fields, and how each is coerced before it goes on the wire. The daemon
 # validates too - this exists so a typo fails here with a readable message instead
@@ -37,7 +50,11 @@ $StyleFieldJson = @{
 }
 
 function Parse-StyleArgs {
-    param([string[]] $Tokens)
+    # ExtraFlags names the non-style flags this particular verb accepts (e.g. 'all' for
+    # reset, 'seconds' for preview). Anything that is neither a known style field nor
+    # in this list is a typo, not a silently-ignored no-op - '--colour' (not '--color')
+    # is the realistic case, since the table header and detail view both print "colour".
+    param([string[]] $Tokens, [string[]] $ExtraFlags = @())
     $positional = @()
     $patch = @{}
     $flags = @{}
@@ -46,9 +63,17 @@ function Parse-StyleArgs {
         $t = $Tokens[$i]
         if ($t -like '--*') {
             $name = $t.Substring(2).ToLowerInvariant()
-            if ($name -eq 'all') { $flags['all'] = $true; $i++; continue }
+            if ($name -eq 'all') {
+                if ($ExtraFlags -notcontains 'all') { throw "unknown flag --all" }
+                $flags['all'] = $true; $i++; continue
+            }
             if ($i + 1 -ge $Tokens.Count) { throw "missing value for --$name" }
             $value = $Tokens[$i + 1]
+            # A value that itself looks like the next flag was very likely never typed -
+            # "set Thinking --color --effect chase" almost certainly means --color was
+            # left blank, not that the colour is literally "--effect".
+            if ($value -like '--*') { throw "missing value for --$name" }
+
             if ($StyleFields.ContainsKey($name)) {
                 switch ($StyleFields[$name]) {
                     'double' {
@@ -65,10 +90,21 @@ function Parse-StyleArgs {
                         }
                         $patch[$StyleFieldJson[$name]] = $n
                     }
-                    default { $patch[$StyleFieldJson[$name]] = $value }
+                    default {
+                        # '#' starts a comment in both cmd.exe and POSIX shells, and
+                        # $ARGUMENTS is interpolated unquoted by the slash command, so a
+                        # literally-typed "--color #FF0000" never reaches here intact -
+                        # accept the bare six hex digits people are forced to type instead
+                        # and restore the '#' the rest of the pipeline expects.
+                        $v = $value
+                        if (($name -eq 'color' -or $name -eq 'color2') -and $v -match '^[0-9a-fA-F]{6}$') { $v = "#$v" }
+                        $patch[$StyleFieldJson[$name]] = $v
+                    }
                 }
-            } else {
+            } elseif ($ExtraFlags -contains $name) {
                 $flags[$name] = $value
+            } else {
+                throw "unknown flag --$name"
             }
             $i += 2
         } else {
@@ -94,27 +130,57 @@ function Call {
         }
         return Invoke-RestMethod -Uri "$base$Path" -Method $Method -TimeoutSec 5 -ErrorAction Stop
     } catch {
-        # A response that carries a real HTTP status (400 unknown state, 405 wrong verb,
-        # 500 save failed, ...) means the daemon is up and answered - that is a completely
-        # different failure than "nothing is listening on the port", and the caller
-        # deserves the daemon's own message rather than being told to go start it. Only a
-        # true connection failure (refused, timed out, DNS) has no Response object at all,
-        # so that case falls through with LastErrorBody left null.
         $resp = $_.Exception.Response
-        if ($resp) {
+        if (-not $resp) {
+            # No HTTP response object at all - refused, timed out, DNS failure. This
+            # really is "nothing is listening", so LastErrorBody stays null and
+            # Show-CallFailure below prints the offline message.
+            return $null
+        }
+
+        # The daemon answered - a 400 unknown state, a 405 wrong verb, a 500 save
+        # failure. That is a completely different failure than "nothing is listening",
+        # and the caller deserves the daemon's own message.
+        #
+        # On PowerShell 5.1, Invoke-RestMethod has ALREADY drained the response stream
+        # to populate $_.ErrorDetails.Message before this catch ever runs - calling
+        # $resp.GetResponseStream() here returns an exhausted stream and reads back
+        # empty. That silently reproduced the exact bug this whole fix exists for: a
+        # 400 read as "daemon is not running". ErrorDetails.Message is also how PS7's
+        # HttpResponseException carries the body, so it is checked first on both.
+        $bodyText = $null
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $bodyText = $_.ErrorDetails.Message.Trim() }
+
+        # Fallback only for the case ErrorDetails came back empty but the response
+        # object still exposes a readable stream (PS 5.1's HttpWebResponse). PS7's
+        # Response is an HttpResponseMessage with no GetResponseStream method at all,
+        # so this is skipped there rather than throwing.
+        if (-not $bodyText -and ($resp.PSObject.Methods.Name -contains 'GetResponseStream')) {
             try {
                 $stream = $resp.GetResponseStream()
                 $reader = New-Object System.IO.StreamReader($stream)
                 $text = $reader.ReadToEnd()
-                if ($text) { $script:LastErrorBody = $text.Trim() }
+                if ($text) { $bodyText = $text.Trim() }
             } catch { }
+        }
+
+        if ($bodyText) {
+            $script:LastErrorBody = $bodyText
+        } else {
+            # A response with no readable body still means "the daemon answered, just
+            # not usefully" - this must never fall through to the offline message,
+            # which would say the opposite of what actually happened.
+            $code = $null
+            try { $code = [int]$resp.StatusCode } catch { }
+            $script:LastErrorBody = if ($code) { "The daemon refused the request (HTTP $code)." } else { "The daemon refused the request." }
         }
         return $null
     }
 }
 
-function Show-Offline {
+function Show-CallFailure {
     if ($script:LastErrorBody) {
+        # This is the daemon's own message, not "nothing is running" - it answered.
         Write-Output $script:LastErrorBody
         return
     }
@@ -136,7 +202,7 @@ switch ($Command.ToLowerInvariant()) {
 
     'status' {
         $s = Call '/status'
-        if (-not $s) { Show-Offline; break }
+        if (-not $s) { Show-CallFailure; break }
         Write-Output "Govee lights daemon v$($s.version)"
         Write-Output "  uptime      : $([math]::Round($s.uptimeSec))s"
         Write-Output "  enabled     : $($s.enabled)"
@@ -163,7 +229,7 @@ switch ($Command.ToLowerInvariant()) {
 
     'devices' {
         $d = Call '/devices'
-        if (-not $d) { Show-Offline; break }
+        if (-not $d) { Show-CallFailure; break }
         Write-Output "Discovered devices (from Govee Desktop):"
         Write-Output ""
         Write-Output ("  {0,-24} {1,-8} {2,8}  {3}" -f 'NAME', 'SKU', 'SEGMENTS', 'LAN')
@@ -188,25 +254,25 @@ switch ($Command.ToLowerInvariant()) {
             break
         }
         $r = Call '/test' 'Post' @{ state = $Argument; holdMs = 8000 }
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Forcing state '$($r.state)' for $([math]::Round($r.holdMs/1000))s - watch your lights."
     }
 
     { $_ -in 'on', 'enable' } {
         $r = Call '/enable' 'Post'
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Lights enabled."
     }
 
     { $_ -in 'off', 'disable' } {
         $r = Call '/disable' 'Post'
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Lights disabled. Hooks are still accepted; nothing is rendered."
     }
 
     'refresh' {
         $r = Call '/refresh' 'Post'
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Device list refreshed from Govee Desktop."
     }
 
@@ -285,25 +351,32 @@ switch ($Command.ToLowerInvariant()) {
     'styles' {
         $parsed = Parse-StyleArgs $Rest
         $state = if ($parsed.Positional.Count -gt 0) { $parsed.Positional[0] } else { $null }
-        $path = if ($state) { "/styles?state=$state" } else { '/styles' }
+        $path = if ($state) { "/styles?state=$([uri]::EscapeDataString($state))" } else { '/styles' }
         $s = Call $path
-        if (-not $s) { Show-Offline; break }
+        if (-not $s) { Show-CallFailure; break }
 
         if ($state) {
+            # A 200 with an empty states array should not happen (the route 400s for an
+            # unknown state), but daemon behaviour is not this script's to assume - print
+            # something readable instead of indexing into nothing.
+            if (-not $s.states -or $s.states.Count -eq 0) {
+                Write-Output "No style data returned for '$state'."
+                break
+            }
             $r = $s.states[0]
             Write-Output "$($r.state)"
             Write-Output "  colour     : $($r.color)$(if ($r.color2) { " -> $($r.color2)" })"
             Write-Output "  effect     : $($r.effect)"
-            Write-Output "  rate       : $($r.hz) Hz"
+            Write-Output "  rate       : $(Format-Invariant $r.hz) Hz"
             Write-Output "  brightness : $($r.brightness)"
             Write-Output "  direction  : $($r.direction)   easing: $($r.easing)"
-            Write-Output "  tail       : $($r.tail)   depth: $($r.depth)   fullSeconds: $($r.fullSeconds)"
+            Write-Output "  tail       : $(Format-Invariant $r.tail)   depth: $(Format-Invariant $r.depth)   fullSeconds: $(Format-Invariant $r.fullSeconds)"
             Write-Output "  source     : $($r.source)"
         } else {
             Write-Output ("  {0,-13}{1,-10}{2,-10}{3,6}{4,8}   {5}" -f 'STATE','COLOUR','EFFECT','HZ','BRIGHT','SOURCE')
             foreach ($r in $s.states) {
                 Write-Output ("  {0,-13}{1,-10}{2,-10}{3,6}{4,8}   {5}" -f `
-                    $r.state, $r.color, $r.effect, $r.hz, $r.brightness, $r.source)
+                    $r.state, $r.color, $r.effect, (Format-Invariant $r.hz), $r.brightness, $r.source)
             }
             Write-Output ""
             if ($s.dirty) { Write-Output "Unsaved changes. '/govee save' to keep them, '/govee revert' to discard." }
@@ -314,25 +387,26 @@ switch ($Command.ToLowerInvariant()) {
     'set' {
         $parsed = Parse-StyleArgs $Rest
         if ($parsed.Positional.Count -lt 1 -or $parsed.Patch.Count -eq 0) {
-            Write-Output "Usage: /govee set <state> --color #RRGGBB [--effect chase] [--hz 0.8] ..."
+            Write-Output "Usage: /govee set <state> --color RRGGBB [--effect chase] [--hz 0.8] ..."
             Write-Output ""
             Write-Output "Fields: color color2 effect hz brightness direction easing tail depth fullseconds"
+            Write-Output "Colours are six hex digits with no '#' - '#' starts a comment in the shell."
             break
         }
         $r = Call '/styles/set' 'Post' @{ state = $parsed.Positional[0]; patch = $parsed.Patch }
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Applied to $($parsed.Positional[0]). Unsaved - '/govee save' to keep it."
     }
 
     'reset' {
-        $parsed = Parse-StyleArgs $Rest
+        $parsed = Parse-StyleArgs $Rest -ExtraFlags @('all')
         if ($parsed.Flags.ContainsKey('all')) {
             $r = Call '/styles/reset' 'Post' @{ all = $true }
-            if (-not $r) { Show-Offline; break }
+            if (-not $r) { Show-CallFailure; break }
             Write-Output "All states reset to built-in defaults. Unsaved - '/govee save' to keep it."
         } elseif ($parsed.Positional.Count -ge 1) {
             $r = Call '/styles/reset' 'Post' @{ state = $parsed.Positional[0] }
-            if (-not $r) { Show-Offline; break }
+            if (-not $r) { Show-CallFailure; break }
             Write-Output "$($parsed.Positional[0]) reset to its built-in default. Unsaved - '/govee save' to keep it."
         } else {
             Write-Output "Usage: /govee reset <state>   |   /govee reset --all"
@@ -341,19 +415,19 @@ switch ($Command.ToLowerInvariant()) {
 
     'save' {
         $r = Call '/styles/save' 'Post'
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         if ($r.saved) { Write-Output "Saved to config.json. Comments and other settings were left alone." }
         else { Write-Output "Nothing to save." }
     }
 
     'revert' {
         $r = Call '/styles/revert' 'Post'
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Unsaved changes discarded."
     }
 
     'preview' {
-        $parsed = Parse-StyleArgs $Rest
+        $parsed = Parse-StyleArgs $Rest -ExtraFlags @('seconds')
         if ($parsed.Positional.Count -lt 1) {
             Write-Output "Usage: /govee preview <state> [--effect comet] [--tail 2.5] [--seconds 8]"
             break
@@ -370,7 +444,7 @@ switch ($Command.ToLowerInvariant()) {
             $hold = [int]($secs * 1000)
         }
         $r = Call '/preview' 'Post' @{ state = $parsed.Positional[0]; patch = $parsed.Patch; holdMs = $hold }
-        if (-not $r) { Show-Offline; break }
+        if (-not $r) { Show-CallFailure; break }
         Write-Output "Previewing $($r.state) for $([math]::Round($r.holdMs / 1000))s - watch your lights. Nothing was changed."
     }
 
@@ -382,7 +456,7 @@ switch ($Command.ToLowerInvariant()) {
         switch ($sub) {
             'list' {
                 $t = Call '/themes'
-                if (-not $t) { Show-Offline; break }
+                if (-not $t) { Show-CallFailure; break }
                 Write-Output ("  {0,-14}{1,-10}{2}" -f 'NAME','KIND','DESCRIPTION')
                 foreach ($x in $t.themes) {
                     $kind = if ($x.builtin) { if ($x.shadowed) { 'built-in*' } else { 'built-in' } } else { 'saved' }
@@ -405,7 +479,7 @@ switch ($Command.ToLowerInvariant()) {
                 $hadPending = [bool]($before -and $before.dirty)
 
                 $r = Call '/themes/apply' 'Post' @{ name = $name }
-                if (-not $r) { Show-Offline; break }
+                if (-not $r) { Show-CallFailure; break }
                 Write-Output "Applied theme '$($r.theme)'. Unsaved - '/govee save' to keep it."
                 if ($hadPending) {
                     Write-Output "Your pending 'set'/'reset' edits were discarded - applying a theme replaces the whole palette."
@@ -414,7 +488,7 @@ switch ($Command.ToLowerInvariant()) {
             'save' {
                 if (-not $name) { Write-Output "Usage: /govee theme save <name>"; break }
                 $r = Call '/themes/save' 'Post' @{ name = $name }
-                if (-not $r) { Show-Offline; break }
+                if (-not $r) { Show-CallFailure; break }
                 if ($r.saved) { Write-Output "Saved current styles as theme '$name'." }
                 else { Write-Output "Nothing to save - no styles are set yet." }
             }
@@ -434,7 +508,7 @@ switch ($Command.ToLowerInvariant()) {
         Write-Output "  logs      tail the daemon log"
         Write-Output "  doctor    diagnose a broken setup"
         Write-Output "  styles    show every state's colour and effect"
-        Write-Output "  set       change a state, e.g. set Thinking --color #FF0000 --hz 2"
+        Write-Output "  set       change a state, e.g. set Thinking --color FF0000 --hz 2"
         Write-Output "  preview   try a style for a few seconds without changing anything"
         Write-Output "  reset     put a state (or --all) back to its built-in default"
         Write-Output "  save      write pending changes to config.json"
@@ -445,4 +519,7 @@ switch ($Command.ToLowerInvariant()) {
 
 } catch {
     Write-Output $_.Exception.Message
+    # Otherwise this exits 0 - a caller (the slash command, a script) has no way to
+    # tell "set Thinking --hz abc" apart from a command that actually succeeded.
+    exit 1
 }

@@ -1,6 +1,6 @@
 ---
 description: Control and inspect the Govee activity-light daemon
-argument-hint: "status | styles [state] | set <state> --color ... | preview <state> | reset <state>|--all | save | revert | theme list|apply|save | devices | test <state> | on | off | refresh | restart | logs | doctor"
+argument-hint: "status | styles [state] | set <state> --color RRGGBB ... | preview <state> | reset <state>|--all | save | revert | theme list|apply|save | devices | test <state> | on | off | refresh | restart | logs | doctor"
 allowed-tools: ["Bash"]
 ---
 

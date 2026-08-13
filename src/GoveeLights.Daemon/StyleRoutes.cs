@@ -297,25 +297,17 @@ namespace GoveeLights
             // that must not straddle a concurrent /styles/set or /styles/save.
             lock (_saveGate)
             {
-                // A theme is a complete palette, so applying one is total: it replaces
-                // whatever was pending, not just the keys this theme happens to mention.
-                // ResetAll alone is NOT enough - it only adds to _cleared and never
-                // touches _pending, so a patch left over from a *previous* theme (or a
-                // plain /styles/set) would otherwise survive underneath: merged field-wise
-                // into a state this theme does patch (Set merges onto the existing pending
-                // entry), or applied on its own, over the built-in default, for a state
-                // this theme does not mention at all. Revert() clears both _pending and
-                // _cleared outright; ResetAll(_cfg()) then re-suppresses the config layer
-                // for the fresh start a themed state is supposed to get.
-                _styles.Revert();
-                _styles.ResetAll(_cfg());
-
-                // If every state in the theme fails validation, Revert + ResetAll above have
-                // already run and the loop below applies nothing - degenerating to "wipe
-                // everything to built-in" while still answering 200 ok. Count what actually
-                // lands and refuse the same way the empty-States case above does when that
-                // count is zero, instead of quietly succeeding at doing nothing useful.
-                var appliedCount = 0;
+                // Validate every state BEFORE touching any store state. A theme that turns
+                // out to be entirely invalid must refuse cleanly at 400 without having
+                // mutated anything - including the caller's own pending edits - exactly as
+                // if it had been rejected up front like the empty-States case above. This
+                // used to run Revert()+ResetAll() first and validate inside the same loop
+                // that applied each state, which meant an all-invalid theme still wiped
+                // pending edits to built-in defaults before reporting failure. Every
+                // predicate here (Enum.TryParse, Enum.IsDefined, Validate) is side-effect
+                // free apart from the warning log, so a pre-pass costs nothing and makes
+                // the whole route atomic in the failure case.
+                var toApply = new List<KeyValuePair<string, StateStyle>>();
                 foreach (var kv in t.States)
                 {
                     // IsDefined, not just TryParse: a hand-edited theme file's State key is
@@ -338,18 +330,26 @@ namespace GoveeLights
                                 { "reason", kv.Value == null ? "null style" : valErr } });
                         continue;
                     }
-                    _styles.Set(a.ToString(), kv.Value);
-                    appliedCount++;
+                    toApply.Add(new KeyValuePair<string, StateStyle>(a.ToString(), kv.Value));
                 }
 
-                // Every state in the theme was unusable: the Revert()+ResetAll() above still
-                // ran (nothing to undo it back to - neither call snapshots what pending held
-                // before), so this genuinely did wipe prior edits to built-in defaults. That
-                // is unavoidable without a snapshot/restore this file has no primitive for;
-                // what this closes is the 200 that claimed the theme applied when nothing in
-                // it actually did.
-                if (appliedCount == 0)
+                if (toApply.Count == 0)
                     return HttpResponse.Text(400, "theme '" + t.Name + "' has no valid states to apply");
+
+                // A theme is a complete palette, so applying one is total: it replaces
+                // whatever was pending, not just the keys this theme happens to mention.
+                // ResetAll alone is NOT enough - it only adds to _cleared and never
+                // touches _pending, so a patch left over from a *previous* theme (or a
+                // plain /styles/set) would otherwise survive underneath: merged field-wise
+                // into a state this theme does patch (Set merges onto the existing pending
+                // entry), or applied on its own, over the built-in default, for a state
+                // this theme does not mention at all. Revert() clears both _pending and
+                // _cleared outright; ResetAll(_cfg()) then re-suppresses the config layer
+                // for the fresh start a themed state is supposed to get. Only reached now
+                // once toApply is known to be non-empty, so a rejected theme never gets here.
+                _styles.Revert();
+                _styles.ResetAll(_cfg());
+                foreach (var kv in toApply) _styles.Set(kv.Key, kv.Value);
             }
 
             Log.Info("theme_applied", t.Name);
