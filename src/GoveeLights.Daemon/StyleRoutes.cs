@@ -16,6 +16,20 @@ namespace GoveeLights
         static Action _onSaved;
         static readonly JavaScriptSerializer _json = new JavaScriptSerializer();
 
+        // Sane ceilings so a typo like --hz 1000000 cannot reach the strip: only a floor
+        // was enforced originally, and the renderer does not clamp the top either.
+        const double MaxHz = 50.0;
+        const double MaxTail = 25.0;
+        const double MaxFullSeconds = 3600.0;
+
+        /// <summary>Serialises the whole save sequence (snapshot -> write -> clear)
+        /// against every other mutating route. Without this, a /styles/set landing
+        /// between Save's snapshot and its Revert is silently wiped: Revert clears
+        /// everything, not just what Save actually wrote. The individual StyleStore
+        /// methods are locked internally, but that only protects each call - not the
+        /// multi-call sequence Save is made of.</summary>
+        static readonly object _saveGate = new object();
+
         public static void Init(Func<DaemonConfig> cfg, StyleStore styles, string configPath, Action onSaved)
         {
             _cfg = cfg; _styles = styles; _configPath = configPath; _onSaved = onSaved;
@@ -48,7 +62,7 @@ namespace GoveeLights
                 });
             }
 
-            if (only != null && rows.Count == 0) return HttpResponse.Text(400, "unknown state: " + only);
+            if (only != null && rows.Count == 0) return HttpResponse.Text(400, UnknownStateError(only));
 
             return HttpResponse.Json(_json.Serialize(new Dictionary<string, object>
             {
@@ -86,11 +100,14 @@ namespace GoveeLights
 
         public static HttpResponse Set(HttpRequest req)
         {
+            var denied = MethodGuard(req);
+            if (denied != null) return denied;
+
             Dictionary<string, object> body;
             if (!TryBody(req, out body)) return HttpResponse.Text(400, "bad json body");
 
-            string state;
-            if (!TryState(body, out state)) return HttpResponse.Text(400, "unknown or missing state");
+            string state, stateErr;
+            if (!TryState(body, out state, out stateErr)) return HttpResponse.Text(400, stateErr);
 
             object rawPatch;
             if (!body.TryGetValue("patch", out rawPatch) || rawPatch == null)
@@ -103,7 +120,9 @@ namespace GoveeLights
             string err;
             if (!Validate(patch, out err)) return HttpResponse.Text(400, err);
 
-            _styles.Set(state, patch);
+            // See _saveGate: a set must not land inside Save's snapshot-write-clear
+            // window, or Revert would erase it without it ever reaching disk.
+            lock (_saveGate) _styles.Set(state, patch);
             Log.Info("style_set", state);
             return HttpResponse.Json("{\"ok\":true,\"dirty\":true}");
         }
@@ -122,9 +141,24 @@ namespace GoveeLights
             if (p.Color2 != null && !string.Equals(p.Color2, "none", StringComparison.OrdinalIgnoreCase)
                 && !HexOk(p.Color2, out error)) return false;
 
-            if (p.Hz.HasValue && p.Hz.Value <= 0) { error = "hz must be greater than 0"; return false; }
-            if (p.Tail.HasValue && p.Tail.Value <= 0) { error = "tail must be greater than 0"; return false; }
-            if (p.FullSeconds.HasValue && p.FullSeconds.Value <= 0) { error = "fullSeconds must be greater than 0"; return false; }
+            // Hz 0 is allowed: Palette.Defaults() itself ships Offline with Hz = 0, and
+            // the resolver already treats a non-positive Hz as "use the 0.6 default" -
+            // rejecting 0 here would stop a user restating a value the daemon seeded.
+            if (p.Hz.HasValue && (p.Hz.Value < 0 || p.Hz.Value > MaxHz))
+            {
+                error = "hz must be between 0 and " + MaxHz.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+            if (p.Tail.HasValue && (p.Tail.Value <= 0 || p.Tail.Value > MaxTail))
+            {
+                error = "tail must be greater than 0 and at most " + MaxTail.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
+            if (p.FullSeconds.HasValue && (p.FullSeconds.Value <= 0 || p.FullSeconds.Value > MaxFullSeconds))
+            {
+                error = "fullSeconds must be greater than 0 and at most " + MaxFullSeconds.ToString(CultureInfo.InvariantCulture);
+                return false;
+            }
             if (p.Depth.HasValue && (p.Depth.Value < 0 || p.Depth.Value > 1)) { error = "depth must be between 0 and 1"; return false; }
             if (p.Brightness.HasValue && (p.Brightness.Value < -1 || p.Brightness.Value > 100))
             { error = "brightness must be -1, or between 0 and 100"; return false; }
@@ -154,51 +188,82 @@ namespace GoveeLights
 
         public static HttpResponse Reset(HttpRequest req)
         {
+            var denied = MethodGuard(req);
+            if (denied != null) return denied;
+
             Dictionary<string, object> body;
             if (!TryBody(req, out body)) return HttpResponse.Text(400, "bad json body");
 
-            object all;
-            if (body.TryGetValue("all", out all) && all is bool && (bool)all)
+            bool wantAll;
+            string allErr;
+            if (!TryAll(body, out wantAll, out allErr)) return HttpResponse.Text(400, allErr);
+
+            if (wantAll)
             {
-                _styles.ResetAll(_cfg());
+                lock (_saveGate) _styles.ResetAll(_cfg());
                 Log.Info("style_reset", "all");
                 return HttpResponse.Json("{\"ok\":true,\"dirty\":true}");
             }
 
-            string state;
-            if (!TryState(body, out state)) return HttpResponse.Text(400, "unknown or missing state");
-            _styles.Reset(state);
+            string state, stateErr;
+            if (!TryState(body, out state, out stateErr)) return HttpResponse.Text(400, stateErr);
+            lock (_saveGate) _styles.Reset(state);
             Log.Info("style_reset", state);
             return HttpResponse.Json("{\"ok\":true,\"dirty\":true}");
         }
 
         public static HttpResponse Revert(HttpRequest req)
         {
-            _styles.Revert();
+            var denied = MethodGuard(req);
+            if (denied != null) return denied;
+
+            lock (_saveGate) _styles.Revert();
             Log.Info("style_revert", "pending cleared");
             return HttpResponse.Json("{\"ok\":true,\"dirty\":false}");
         }
 
         public static HttpResponse Save(HttpRequest req)
         {
-            if (!_styles.Dirty) return HttpResponse.Json("{\"ok\":true,\"saved\":false,\"reason\":\"nothing to save\"}");
+            var denied = MethodGuard(req);
+            if (denied != null) return denied;
 
-            var merged = _styles.Merged(_cfg());
-
-            // Mute the watcher first: the write we are about to do would otherwise be read
-            // back as a foreign edit, rebuilding the config while pending is still live.
-            if (_onSaved != null) _onSaved();
-
-            string err;
-            if (!ConfigWriter.TrySave(_configPath, merged, out err))
+            // The whole sequence - snapshot, write, clear - must run as one unit: see
+            // _saveGate. Every other mutating route takes the same lock so none of them
+            // can land in the middle of it.
+            lock (_saveGate)
             {
-                Log.Warn("style_save_failed", err);
-                return HttpResponse.Text(500, "save failed: " + err);
-            }
+                if (!_styles.Dirty) return HttpResponse.Json("{\"ok\":true,\"saved\":false,\"reason\":\"nothing to save\"}");
 
-            _styles.Revert();
-            Log.Info("style_saved", _configPath);
-            return HttpResponse.Json("{\"ok\":true,\"saved\":true}");
+                var merged = _styles.Merged(_cfg());
+
+                // Mute the watcher first: the write we are about to do would otherwise be
+                // read back as a foreign edit, rebuilding the config while pending is
+                // still live.
+                if (_onSaved != null) _onSaved();
+
+                string err;
+                if (!ConfigWriter.TrySave(_configPath, merged, out err))
+                {
+                    Log.Warn("style_save_failed", err);
+                    return HttpResponse.Text(500, "save failed: " + err);
+                }
+
+                _styles.Revert();
+                Log.Info("style_saved", _configPath);
+                return HttpResponse.Json("{\"ok\":true,\"saved\":true}");
+            }
+        }
+
+        /// <summary>The five /styles* routes are the only ones in this daemon that can
+        /// destroy user data - discard unsaved edits or overwrite the config file. A GET
+        /// from a page in the user's browser (an &lt;img&gt; tag, a stray form) can reach
+        /// 127.0.0.1 with no way to read the response, but the side effect still lands.
+        /// Requiring POST does not stop a malicious page from sending one, but it does
+        /// stop the trivial no-JS vectors, and it is free.</summary>
+        static HttpResponse MethodGuard(HttpRequest req)
+        {
+            if (string.Equals(req.Method, "POST", StringComparison.OrdinalIgnoreCase)) return null;
+            return HttpResponse.Text(405, "POST required");
         }
 
         static bool TryBody(HttpRequest req, out Dictionary<string, object> body)
@@ -210,13 +275,59 @@ namespace GoveeLights
             return body != null;
         }
 
-        static bool TryState(Dictionary<string, object> body, out string state)
+        /// <summary>"all" as a real JSON boolean is the documented shape, but a string
+        /// "true"/"false" is accepted too - shells and simple HTTP clients stringify
+        /// easily. Anything else is rejected with a reason instead of silently falling
+        /// through to "unknown or missing state", which is what happened before and told
+        /// the caller nothing about what was actually wrong.</summary>
+        static bool TryAll(Dictionary<string, object> body, out bool wantAll, out string error)
         {
-            state = null;
+            wantAll = false; error = null;
+            object all;
+            if (!body.TryGetValue("all", out all) || all == null) return true;
+
+            if (all is bool) { wantAll = (bool)all; return true; }
+
+            var s = all as string;
+            if (s != null)
+            {
+                bool parsed;
+                if (bool.TryParse(s, out parsed)) { wantAll = parsed; return true; }
+                error = "\"all\" must be a boolean, got '" + s + "'";
+                return false;
+            }
+
+            error = "\"all\" must be a boolean";
+            return false;
+        }
+
+        static string UnknownStateError(string given)
+        {
+            return "unknown state '" + given + "'; valid: " + string.Join(", ", Enum.GetNames(typeof(Activity)));
+        }
+
+        /// <summary>Enum.TryParse on a non-[Flags] enum accepts the decimal underlying
+        /// value and comma-separated lists without checking they are defined - so
+        /// {"state": 999} or {"state": "Idle,Done"} would otherwise parse into a key that
+        /// /styles can never show or reset (it enumerates Enum.GetNames), yet save would
+        /// still write it into the config. Enum.IsDefined closes that gap.</summary>
+        static bool TryState(Dictionary<string, object> body, out string state, out string error)
+        {
+            state = null; error = null;
             object raw;
-            if (!body.TryGetValue("state", out raw) || raw == null) return false;
+            if (!body.TryGetValue("state", out raw) || raw == null)
+            {
+                error = "missing state; valid: " + string.Join(", ", Enum.GetNames(typeof(Activity)));
+                return false;
+            }
+
+            var text = raw.ToString();
             Activity a;
-            if (!Enum.TryParse(raw.ToString(), true, out a)) return false;
+            if (!Enum.TryParse(text, true, out a) || !Enum.IsDefined(typeof(Activity), a))
+            {
+                error = UnknownStateError(text);
+                return false;
+            }
             state = a.ToString();     // canonical casing, so the pending map keys match
             return true;
         }

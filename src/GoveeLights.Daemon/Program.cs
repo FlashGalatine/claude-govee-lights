@@ -25,7 +25,11 @@ namespace GoveeLights
         static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         static readonly DateTime _startedAt = DateTime.UtcNow;
         static readonly ManualResetEventSlim _quit = new ManualResetEventSlim(false);
-        static DateTime _suppressWatchUntil = DateTime.MinValue;
+        // Ticks, not a DateTime: SuppressWatch runs on a threadpool thread (the HTTP
+        // handler) and the Changed lambda reads it on the FileSystemWatcher thread.
+        // DateTime is an 8-byte struct with no atomicity guarantee for a plain field
+        // read/write on 32-bit; Interlocked over a long sidesteps the question entirely.
+        static long _suppressWatchUntilTicks;
 
         static DaemonConfig Cfg() { lock (_cfgGate) return _cfg; }
 
@@ -34,7 +38,7 @@ namespace GoveeLights
         /// pending edits are live would rebuild the config underneath them.</summary>
         public static void SuppressWatch(int ms)
         {
-            _suppressWatchUntil = DateTime.UtcNow.AddMilliseconds(ms);
+            Interlocked.Exchange(ref _suppressWatchUntilTicks, DateTime.UtcNow.AddMilliseconds(ms).Ticks);
         }
 
         [STAThread]
@@ -319,7 +323,7 @@ namespace GoveeLights
                 DateTime last = DateTime.MinValue;
                 _watcher.Changed += (s, e) =>
                 {
-                    if (DateTime.UtcNow < _suppressWatchUntil) return;
+                    if (DateTime.UtcNow.Ticks < Interlocked.Read(ref _suppressWatchUntilTicks)) return;
 
                     // Editors write in bursts; debounce so we reload once.
                     if ((DateTime.UtcNow - last).TotalMilliseconds < 500) return;
