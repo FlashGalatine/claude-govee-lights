@@ -17,6 +17,7 @@ namespace GoveeLights
         static readonly object _cfgGate = new object();
         static GoveeClient _govee;
         static SessionStore _sessions;
+        static StyleStore _styles = new StyleStore();
         static HookMapper _mapper;
         static Renderer _renderer;
         static MiniHttpServer _http;
@@ -77,7 +78,7 @@ namespace GoveeLights
             };
             _mapper = new HookMapper(_sessions, _cfg.ToolClassMap);
             _govee = new GoveeClient(_cfg.GoveeDllPath, _cfg.ApiGuid);
-            _renderer = new Renderer(_govee, _sessions, Cfg);
+            _renderer = new Renderer(_govee, _sessions, Cfg, _styles);
 
             // A roster reloaded later (retry after a cold-start race, or /refresh) is
             // useless unless the render roster is rebuilt from it.

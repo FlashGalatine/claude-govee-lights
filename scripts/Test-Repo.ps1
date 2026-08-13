@@ -642,12 +642,57 @@ if (-not $exe) {
     $spMidIdx = [int]($spBlend.Count / 2)
     if ($spBlend[$spMidIdx] -ne $spPure[$spMidIdx]) { Ok 'spatial blend midpoint is not simply the incoming frame' }
     else { No 'spatial blend midpoint equals the pure incoming frame' 'Blend may be returning b outright for segment arrays.' }
+
+    # ---- pending layer -----------------------------------------------------
+    # The layer /govee set writes into. It must beat the config file, lose to a
+    # device's own override, and its tombstone must drop the config layer entirely.
+    function Get-ResolvedRow {
+        param([string[]] $ExtraArgs, [string] $State)
+        $lines = Invoke-Dump (@('--resolve-states') + $ExtraArgs)
+        $row = @($lines | Where-Object { $_ -like "$State,*" })
+        if ($row.Count -ne 1) { return $null }
+        $f = $row[0].Split(',')
+        return @{ effect = $f[1]; color = $f[2]; hz = $f[4] }
+    }
+
+    $pl = Join-Path $root 'tests/fixtures/pending-layers.json'
+
+    $base = Get-ResolvedRow @('--config', $pl) 'Thinking'
+    if ($base -and $base.color -eq '#111111' -and $base.hz -eq '0.4') {
+        Ok 'config States resolves when nothing is pending' "$($base.color) @ $($base.hz)Hz"
+    } else { No 'config States did not resolve' ($base | Out-String) }
+
+    # Pending beats the file. Colour changes, and Hz is NOT restated in the patch -
+    # so if pending replaced the layer wholesale instead of merging, Hz would revert.
+    $ov = Get-ResolvedRow @('--config', $pl, '--pending', '{"Thinking":{"Color":"#222222"}}') 'Thinking'
+    if ($ov -and $ov.color -eq '#222222' -and $ov.hz -eq '0.4') {
+        Ok 'pending beats config and merges field-wise' "$($ov.color) @ $($ov.hz)Hz"
+    } else { No 'pending layer wrong' ($ov | Out-String) }
+
+    # A device override still wins over pending.
+    $dv = Get-ResolvedRow @('--config', $pl, '--device', 'CeilingStrip',
+                            '--pending', '{"Thinking":{"Color":"#222222"}}') 'Thinking'
+    if ($dv -and $dv.color -eq '#333333') { Ok 'device override still beats pending' $dv.color }
+    else { No 'pending wrongly beat the device layer' ($dv | Out-String) }
+
+    # Tombstone drops the config layer back to the built-in default (#7B4DFF).
+    $tb = Get-ResolvedRow @('--config', $pl, '--pending', '{"Thinking":null}') 'Thinking'
+    if ($tb -and $tb.color -eq '#7B4DFF' -and $tb.hz -eq '0.6') {
+        Ok 'tombstone falls back to the built-in default' "$($tb.color) @ $($tb.hz)Hz"
+    } else { No 'tombstone did not clear the config layer' ($tb | Out-String) }
+
+    # ---- known-value export ------------------------------------------------
+    $known = @(Invoke-Dump @('--list-known'))
+    $effectsLine = @($known | Where-Object { $_ -like 'effects,*' })
+    if ($effectsLine.Count -eq 1 -and ($effectsLine[0].Split(',').Count - 1) -eq 10) {
+        Ok '--list-known reports all ten effects'
+    } else { No '--list-known effect list wrong' ($effectsLine -join ' ') }
 }
 
 # Shipping an example config that names an effect the engine does not implement
 # would render as solid, only warning once per distinct value in the daemon log
 # rather than failing loudly, so this check catches it before it ships.
-$known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+$known = @($effectsLine[0].Split(',') | Select-Object -Skip 1)
 if ($parsed['config/config.example.json']) {
     $badEffects = @()
     # Both the live States block and the _examples_states showcase, since a broken

@@ -31,6 +31,7 @@ namespace GoveeLights
         readonly GoveeClient _govee;
         readonly SessionStore _sessions;
         readonly Func<DaemonConfig> _cfg;
+        readonly StyleStore _styles;
         readonly Thread _thread;
         volatile bool _running = true;
 
@@ -68,11 +69,12 @@ namespace GoveeLights
         public int SendCount { get; private set; }
         public DateTime LastActivityAt { get; private set; } = DateTime.UtcNow;
 
-        public Renderer(GoveeClient govee, SessionStore sessions, Func<DaemonConfig> cfg)
+        public Renderer(GoveeClient govee, SessionStore sessions, Func<DaemonConfig> cfg, StyleStore styles)
         {
             _govee = govee;
             _sessions = sessions;
             _cfg = cfg;
+            _styles = styles;
             _thread = new Thread(Loop) { Name = "renderer", IsBackground = true };
             _thread.Start();
         }
@@ -217,7 +219,7 @@ namespace GoveeLights
                 // comet, ...) falls back to breathe when a device has no strip to be
                 // spatial on, and that fallback depends on this device's own segment
                 // count (Palette.ResolveFor).
-                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
+                var style = Palette.ResolveFor(cfg, _styles, d.Cfg, _current, segs);
                 var frame = Effects.Render(style, t, tInState, segs);
 
                 if (fading)
@@ -226,7 +228,7 @@ namespace GoveeLights
                     // rather than snapping. Only inside the TransitionMs window.
                     // tInPrevState, not tInState: the outgoing state's clock did not
                     // restart just because we left it.
-                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
+                    var prev = Palette.ResolveFor(cfg, _styles, d.Cfg, _previous, segs);
                     var prevFrame = Effects.Render(prev, t, tInPrevState, segs);
                     frame = Effects.Blend(prevFrame, frame, mix);
                 }

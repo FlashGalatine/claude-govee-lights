@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Web.Script.Serialization;
@@ -25,6 +26,9 @@ namespace GoveeLights
             // stdout so the frame stream stays machine-readable.
             Log.AlsoConsole = true;
             Log.ConsoleToStderr = true;
+
+            if (HasFlag(args, "--list-known")) return ListKnown();
+            if (HasFlag(args, "--resolve-states")) return ResolveStates(args);
 
             var segments = ArgInt(args, "--segments", 10);
             var seconds  = ArgDouble(args, "--seconds", 2.0);
@@ -77,7 +81,7 @@ namespace GoveeLights
                         return 2;
                     }
                 }
-                style = Palette.ResolveFor(cfg, dev, a, segments);
+                style = Palette.ResolveFor(cfg, null, dev, a, segments);
             }
 
             ResolvedStyle fromStyle = null;
@@ -90,7 +94,7 @@ namespace GoveeLights
                     Console.Error.WriteLine("unknown --from: " + fromName);
                     return 2;
                 }
-                fromStyle = Palette.ResolveFor(null, null, fa, segments);
+                fromStyle = Palette.ResolveFor(null, null, null, fa, segments);
             }
 
             var w = Console.Out;
@@ -117,6 +121,91 @@ namespace GoveeLights
                 var cells = f.Segments ?? new[] { f.Solid };
                 w.WriteLine(t.ToString("0.000", CultureInfo.InvariantCulture) + "," +
                             string.Join(",", cells.Select(c => c.ToHex()).ToArray()));
+            }
+            w.Flush();
+            return 0;
+        }
+
+        static bool HasFlag(string[] args, string name)
+        {
+            for (int i = 0; i < args.Length; i++)
+                if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>The engine's vocabulary, so Test-Repo and the CLI can validate against
+        /// the real lists instead of restating them.</summary>
+        static int ListKnown()
+        {
+            Console.Out.WriteLine("effects," + string.Join(",", Palette.EffectNames()));
+            Console.Out.WriteLine("directions," + string.Join(",", Palette.DirectionNames()));
+            Console.Out.WriteLine("easings," + string.Join(",", Palette.EasingNames()));
+            Console.Out.Flush();
+            return 0;
+        }
+
+        /// <summary>Resolve every state through the full layer stack and print it, so the
+        /// merge is testable without hardware. --pending takes the same shape StyleStore
+        /// holds: state name to a partial StateStyle, or literal null for a tombstone.</summary>
+        static int ResolveStates(string[] args)
+        {
+            var configPath = Arg(args, "--config", null);
+            DaemonConfig cfg = null;
+            if (!string.IsNullOrEmpty(configPath))
+            {
+                string e;
+                cfg = DaemonConfig.Load(configPath, out e);
+                if (cfg == null) { Console.Error.WriteLine("bad --config: " + e); return 2; }
+            }
+
+            var store = new StyleStore();
+            var pendingJson = Arg(args, "--pending", null);
+            if (!string.IsNullOrEmpty(pendingJson))
+            {
+                Dictionary<string, StateStyle> parsed;
+                try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(pendingJson); }
+                catch (Exception ex) { Console.Error.WriteLine("bad --pending: " + ex.Message); return 2; }
+                if (parsed != null)
+                    foreach (var kv in parsed)
+                    {
+                        if (kv.Value == null) store.Reset(kv.Key);
+                        else store.Set(kv.Key, kv.Value);
+                    }
+            }
+
+            DeviceConfig dev = null;
+            var deviceName = Arg(args, "--device", null);
+            if (cfg != null && !string.IsNullOrEmpty(deviceName))
+            {
+                dev = cfg.Devices.FirstOrDefault(x => x != null &&
+                          string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
+                if (dev == null)
+                {
+                    Console.Error.WriteLine("unknown --device: " + deviceName);
+                    return 2;
+                }
+            }
+
+            var segments = ArgInt(args, "--segments", 10);
+            if (segments < 1) segments = 1;
+
+            var w = Console.Out;
+            w.WriteLine("state,effect,color,color2,hz,brightness,direction,easing,tail,depth,fullseconds");
+            foreach (var name in Enum.GetNames(typeof(Activity)))
+            {
+                Activity a;
+                Enum.TryParse(name, true, out a);
+                var r = Palette.ResolveFor(cfg, store, dev, a, segments);
+                w.WriteLine(string.Join(",", new[]
+                {
+                    name, r.Effect, r.Color.ToHex(), r.HasColor2 ? r.Color2.ToHex() : "none",
+                    r.Hz.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.Brightness.ToString(CultureInfo.InvariantCulture),
+                    r.Direction, r.Easing,
+                    r.Tail.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.Depth.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.FullSeconds.ToString("0.###", CultureInfo.InvariantCulture)
+                }));
             }
             w.Flush();
             return 0;
