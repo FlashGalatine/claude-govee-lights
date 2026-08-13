@@ -45,8 +45,10 @@ time:
   `solid`, `forward` or `linear` respectively; and an unparseable `Color` or `Color2`
   falls back to grey `#787878` or black `#000000`.
 
-Every one of those corrections logs a `style_unknown_value` warning, once per
-distinct bad value — worth checking `/govee logs` after hand-editing a config, since
+An unrecognised `Effect`, `Direction`, `Easing`, `Color` or `Color2` logs a
+`style_unknown_value` warning, once per distinct bad value. The numeric corrections
+(`Hz`, `Tail` and `FullSeconds` falling back, `Depth` being clamped) are silent — it
+is worth checking `/govee logs` after hand-editing a config, since
 a typo does not otherwise announce itself beyond the lights not doing what you
 expected. Under `--dump-frames` the same warnings go to **stderr**, leaving the frame
 stream on stdout clean.

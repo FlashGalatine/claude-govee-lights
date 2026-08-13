@@ -109,7 +109,11 @@ namespace GoveeLights
                 {
                     foreach (var c in cfg.Devices)
                     {
-                        if (!c.Enabled) continue;
+                        // A null element survives Normalize now that it no longer throws
+                        // there, and SyncDevices runs from the DevicesLoaded callback -
+                        // outside the render tick's catch - so an unguarded deref here
+                        // would surface as an unhandled exception out of the SDK.
+                        if (c == null || !c.Enabled) continue;
                         var found = discovered.FirstOrDefault(x =>
                             string.Equals(x.Name, c.Name, StringComparison.OrdinalIgnoreCase));
 
