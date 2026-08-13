@@ -492,10 +492,19 @@ patches, `Set` leaves `_cleared` alone, `Revert` clears both, `Merged` uses a nu
 for cleared states, and `BuildLayers` skips `cfg.States` when `IsCleared(key)`. The
 repository is the authority; the code in this task's steps is the pre-fix version.
 
-A consequence worth knowing in Task 5: `ThemeApply` calls `ResetAll()` then `Set` per
-state, so every state is cleared *and* patched — `Merged()` therefore writes each theme
-style exactly, with no stray fields inherited from whatever config the theme replaced.
-That is the correct reading of "applying a theme is total".
+A consequence for Task 5, **corrected after review**: an earlier version of this note
+claimed `ThemeApply` could call `ResetAll()` then `Set` per state and get totality for
+free. That is wrong, and the error is worth recording. `ResetAll` adds to `_cleared`
+only — it deliberately does not touch `_pending`, because `/styles/reset --all` means
+"suppress the config layer, keep patches". So a reset before the `Set` loop does nothing
+to the *previous* theme, which is still sitting in `_pending`, and `Set` merges field-wise
+over it: a field the incoming theme leaves null inherits the outgoing theme's value.
+Worse, a state the theme never mentions keeps any earlier `/styles/set` patch, and
+`Merged()` writes it into a saved theme file.
+
+`ThemeApply` must therefore call `Revert()` **and** `ResetAll(cfg)` before applying, inside
+the same lock. Revert clears both structures; ResetAll then re-suppresses the config layer.
+Discarding prior unsaved edits is exactly what "applying a theme is total" means.
 
 ---
 
