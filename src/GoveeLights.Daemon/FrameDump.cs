@@ -31,6 +31,14 @@ namespace GoveeLights
             if (HasFlag(args, "--list-known")) return ListKnown();
             if (HasFlag(args, "--resolve-states")) return ResolveStates(args);
             if (HasFlag(args, "--splice-states")) return SpliceStates(args);
+            if (HasFlag(args, "--list-themes")) return ListThemes();
+            if (HasFlag(args, "--check-theme-name"))
+            {
+                var n = Arg(args, "--check-theme-name", null);
+                Console.Out.WriteLine(Themes.IsValidName(n) ? "valid" : "invalid");
+                Console.Out.Flush();
+                return 0;
+            }
 
             var segments = ArgInt(args, "--segments", 10);
             var seconds  = ArgDouble(args, "--seconds", 2.0);
@@ -146,12 +154,35 @@ namespace GoveeLights
             return 0;
         }
 
+        /// <summary>Every theme, built-in and user, so the CLI can list what is available
+        /// without duplicating Themes' own notion of what "available" means.</summary>
+        static int ListThemes()
+        {
+            var w = Console.Out;
+            w.WriteLine("name,builtin,states,description");
+            foreach (var info in Themes.List())
+            {
+                Theme t; string err;
+                var count = Themes.TryLoad(info.Name, out t, out err) && t.States != null ? t.States.Count : 0;
+                w.WriteLine(string.Join(",", new[]
+                {
+                    info.Name, info.Builtin ? "yes" : "no",
+                    count.ToString(CultureInfo.InvariantCulture),
+                    (info.Description ?? "").Replace(",", " ")
+                }));
+            }
+            w.Flush();
+            return 0;
+        }
+
         /// <summary>Resolve every state through the full layer stack and print it, so the
         /// merge is testable without hardware. --pending takes the same shape StyleStore
         /// holds: state name to a partial StateStyle, or literal null for a tombstone.
         /// --cleared is a comma-separated list of states to Reset before --pending is
         /// applied, so a reset-then-set sequence (StyleStore keeps the two independent)
-        /// is testable too - --pending alone cannot express that ordering.</summary>
+        /// is testable too - --pending alone cannot express that ordering. --theme seeds
+        /// the store from a whole theme before --pending is applied, so a theme's own
+        /// resolved output is testable, and an explicit --pending still wins per field.</summary>
         static int ResolveStates(string[] args)
         {
             var configPath = Arg(args, "--config", null);
@@ -171,6 +202,23 @@ namespace GoveeLights
                     var trimmed = name.Trim();
                     if (trimmed.Length > 0) store.Reset(trimmed);
                 }
+
+            // Applied before --pending, not after: StyleStore.Set merges a new patch's
+            // non-null fields over whatever is already pending for that state, so the
+            // patch applied *second* is the one that wins per field. Seeding from the
+            // theme here and letting --pending layer on top afterwards is what makes an
+            // explicit --pending able to override a theme rather than the reverse.
+            var themeName = Arg(args, "--theme", null);
+            if (!string.IsNullOrEmpty(themeName))
+            {
+                Theme t; string terr;
+                if (!Themes.TryLoad(themeName, out t, out terr))
+                {
+                    Console.Error.WriteLine("bad --theme: " + terr);
+                    return 2;
+                }
+                foreach (var kv in t.States) store.Set(kv.Key, kv.Value);
+            }
 
             var pendingJson = Arg(args, "--pending", null);
             if (!string.IsNullOrEmpty(pendingJson))

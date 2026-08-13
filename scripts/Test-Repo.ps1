@@ -841,6 +841,53 @@ if (-not $exe) {
         (-not (Get-Member -InputObject $parsed4.States.Thinking -Name 'Color' -ErrorAction SilentlyContinue))) {
         Ok 'Merged() emits the patch alone for a cleared-then-patched state, no config fields leak in'
     } else { No 'Merged() leaked a config field into a cleared-then-patched state' $rCleared }
+
+    # ---- themes ------------------------------------------------------------
+    # A theme is a complete palette: applying one must not leave residue from the
+    # last, so every built-in has to name every state.
+    $themeRows = @(Invoke-Dump @('--list-themes') | Where-Object { $_ -and $_ -notlike 'name,*' })
+    $stateCount = (@(Invoke-Dump @('--resolve-states')) | Where-Object { $_ -and $_ -notlike 'state,*' }).Count
+
+    $builtins = @($themeRows | Where-Object { $_.Split(',')[1] -eq 'yes' })
+    if ($builtins.Count -ge 4) { Ok "built-in themes present ($($builtins.Count))" }
+    else { No 'expected at least four built-in themes' ($builtins -join '; ') }
+
+    $incomplete = @($builtins | Where-Object { [int]$_.Split(',')[2] -ne $stateCount })
+    if ($incomplete.Count -eq 0) { Ok "every built-in theme covers all $stateCount states" }
+    else { No 'a built-in theme is missing states' ($incomplete -join '; ') }
+
+    # Palette.Norm always resolves to a *known* effect (it falls back to a default
+    # rather than ever emitting a value it doesn't recognise), so a typo in a theme's
+    # raw Effect field can never show up in --resolve-states' resolved CSV - checking
+    # that column would pass even with a bogus effect baked into a shipped theme.
+    # What the typo DOES do is trip Palette's WarnOnce, and --dump-frames routes that
+    # straight to stderr (Log.AlsoConsole/ConsoleToStderr, set for the whole dump mode).
+    # That is the only place a themed typo is observable, so check there instead.
+    function Invoke-DumpCapture {
+        param([string[]] $DumpArgs)
+        $tmpOut = [System.IO.Path]::GetTempFileName()
+        $tmpErr = [System.IO.Path]::GetTempFileName()
+        try {
+            $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
+            Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait `
+                -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr | Out-Null
+            return [PSCustomObject]@{ StdErr = (Get-Content $tmpErr -Raw) }
+        } finally { Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
+    }
+    $themeEffectsBad = @()
+    foreach ($t in @('default','muted','vivid','mono')) {
+        $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t)
+        if ($cap.StdErr -match '"evt":"style_unknown_value"' -and $cap.StdErr -match '"field":"Effect"') {
+            $themeEffectsBad += $t
+        }
+    }
+    if ($themeEffectsBad.Count -eq 0) { Ok 'every built-in theme names only known effects' }
+    else { No 'a built-in theme names an unknown effect' ($themeEffectsBad -join ', ') }
+
+    # Name validation is a path guard, not cosmetics.
+    $badNames = @(Invoke-Dump @('--check-theme-name', '../evil'))
+    if ($badNames -join '' -match 'invalid') { Ok 'theme names reject path traversal' }
+    else { No 'theme name validation accepted ../evil' ($badNames -join ' ') }
 }
 
 # Shipping an example config that names an effect the engine does not implement
