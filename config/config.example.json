@@ -53,13 +53,13 @@
     "Done":        { "Color": "#22DD55", "Effect": "solid",   "Hz": 1.0,  "Brightness": 70 }
   },
 
+  "_comment_examples": "Not read by the daemon. The names below are recipe labels, NOT state names - a States key must be one of Idle, Thinking, ToolRead, ToolEdit, ToolShell, ToolWeb, ToolMcp, ToolAgent, ToolOther, Compacting, WaitingUser, Error, Done, Offline, and anything else is ignored (and logged as config_unknown_state). Copy the VALUE onto a real state name, e.g. \"ToolShell\": { \"Effect\": \"chase\", \"Direction\": \"pingpong\", \"Hz\": 0.8 }.",
   "_examples_states": {
-    "_comment": "Not read by the daemon - copy any of these into States above.",
-    "scanner":     { "Effect": "chase", "Direction": "pingpong", "Hz": 0.8 },
-    "two_colour":  { "Color": "#FF2020", "Color2": "#3A0000", "Effect": "blink", "Hz": 2.5 },
-    "long_comet":  { "Effect": "comet", "Tail": 2.5, "Hz": 0.5 },
-    "long_job":    { "Effect": "progress", "FullSeconds": 45 },
-    "just_slower": { "Hz": 0.2 }
+    "recipe_scanner":     { "Effect": "chase", "Direction": "pingpong", "Hz": 0.8 },
+    "recipe_two_colour":  { "Color": "#FF2020", "Color2": "#3A0000", "Effect": "blink", "Hz": 2.5 },
+    "recipe_long_comet":  { "Effect": "comet", "Tail": 2.5, "Hz": 0.5 },
+    "recipe_long_job":    { "Effect": "progress", "FullSeconds": 45 },
+    "recipe_just_slower": { "Hz": 0.2 }
   },
 
   "_comment_tools": "Overrides only - the built-in map already covers the standard tools. Anything starting with mcp__ is classified as ToolMcp automatically.",

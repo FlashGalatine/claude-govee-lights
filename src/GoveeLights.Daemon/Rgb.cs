@@ -10,12 +10,24 @@ namespace GoveeLights
 
         public static Rgb Parse(string hex, Rgb fallback)
         {
-            if (string.IsNullOrEmpty(hex)) return fallback;
+            Rgb r;
+            return TryParse(hex, out r) ? r : fallback;
+        }
+
+        /// <summary>Parse without silently swallowing the failure. Callers that know which
+        /// field a value came from use this so a malformed colour can be reported the same
+        /// way a malformed Effect or Easing already is, rather than turning into grey with
+        /// no diagnostic anywhere.</summary>
+        public static bool TryParse(string hex, out Rgb rgb)
+        {
+            rgb = new Rgb(0, 0, 0);
+            if (string.IsNullOrEmpty(hex)) return false;
             hex = hex.Trim().TrimStart('#');
-            if (hex.Length != 6) return fallback;
+            if (hex.Length != 6) return false;
             int v;
-            if (!int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)) return fallback;
-            return new Rgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            if (!int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)) return false;
+            rgb = new Rgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            return true;
         }
 
         public Rgb Scale(double k) => new Rgb(Clamp(R * k), Clamp(G * k), Clamp(B * k));

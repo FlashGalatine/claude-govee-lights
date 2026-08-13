@@ -15,7 +15,7 @@ namespace GoveeLights
     ///
     /// An effect is a pure shape: weights in 0..1, one per segment, knowing nothing about
     /// modifiers. Shared stages then apply direction, easing, depth and colour in that
-    /// fixed order. Writing modifiers once is what keeps eleven effects from disagreeing
+    /// fixed order. Writing modifiers once is what keeps ten effects from disagreeing
     /// about what "reverse" means.
     ///
     /// Spatial effects on a single-zone device are handled upstream, at resolve time

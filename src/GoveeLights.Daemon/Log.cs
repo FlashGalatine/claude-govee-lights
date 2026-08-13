@@ -29,6 +29,12 @@ namespace GoveeLights
         public static LogLevel Level = LogLevel.Info;
         public static bool AlsoConsole = false;
 
+        /// <summary>Send the AlsoConsole copy to stderr as the raw JSONL record instead of
+        /// the human line on stdout. --dump-frames sets this: stdout there is a frame
+        /// stream that a test harness parses, and the record's own fields (which field, what
+        /// value, what was used instead) are exactly what a user previewing a style needs.</summary>
+        public static bool ConsoleToStderr = false;
+
         public static void Init(string dir)
         {
             _dir = dir;
@@ -88,7 +94,12 @@ namespace GoveeLights
 
                 if (AlsoConsole)
                 {
-                    try { Console.WriteLine("{0} {1,-5} {2} {3}", rec["ts"], rec["lvl"], evt, msg); } catch { }
+                    try
+                    {
+                        if (ConsoleToStderr) Console.Error.WriteLine(line);
+                        else Console.WriteLine("{0} {1,-5} {2} {3}", rec["ts"], rec["lvl"], evt, msg);
+                    }
+                    catch { }
                 }
             }
         }

@@ -17,6 +17,15 @@ namespace GoveeLights
     {
         public static int Run(string[] args)
         {
+            // Dump mode returns before Log.Init, so warnings had nowhere to go: a
+            // --style with a typo in it printed a perfectly clean solid frame stream and
+            // said nothing, while the docs point users here to preview a style AND tell
+            // them typos announce themselves in the log. Route them to stderr rather than
+            // a file - there is no config dir in this mode - and to stderr rather than
+            // stdout so the frame stream stays machine-readable.
+            Log.AlsoConsole = true;
+            Log.ConsoleToStderr = true;
+
             var segments = ArgInt(args, "--segments", 10);
             var seconds  = ArgDouble(args, "--seconds", 2.0);
             var fps      = ArgInt(args, "--fps", 25);
@@ -54,7 +63,20 @@ namespace GoveeLights
                 DeviceConfig dev = null;
                 var deviceName = Arg(args, "--device", null);
                 if (cfg != null && !string.IsNullOrEmpty(deviceName))
-                    dev = cfg.Devices.FirstOrDefault(x => string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
+                {
+                    dev = cfg.Devices.FirstOrDefault(x => x != null &&
+                        string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
+
+                    // A typo here used to return the global-layer style with exit 0, so the
+                    // documented way to preview per-device overrides silently showed the
+                    // wrong answer. Every other bad argument reports and returns 2.
+                    if (dev == null)
+                    {
+                        Console.Error.WriteLine("unknown --device: " + deviceName +
+                            " (known: " + string.Join(", ", cfg.Devices.Where(x => x != null).Select(x => x.Name).ToArray()) + ")");
+                        return 2;
+                    }
+                }
                 style = Palette.ResolveFor(cfg, dev, a, segments);
             }
 

@@ -47,6 +47,19 @@ namespace GoveeLights
         Activity _previous = Activity.Offline;
         DateTime _transitionStart = DateTime.MinValue;
 
+        /// <summary>When the state we are fading OUT of started. The outgoing frame has to
+        /// be rendered with its own time-in-state, not the incoming state's: progress reads
+        /// tInState, so reusing the fresh _transitionStart collapsed a filled bar to empty
+        /// for the whole TransitionMs window - the jump cut the cross-fade exists to remove,
+        /// just moved onto the outgoing frame.
+        ///
+        /// DateTime.MinValue on the very first transition is correct, not a hole: the
+        /// elapsed value is then enormous, and progress clamps frac to 1 (Effects.Shape),
+        /// so it renders a full bar. "A state whose start we never recorded has been
+        /// running forever" is the right reading, and progress is the only shape that looks
+        /// at tInState at all.</summary>
+        DateTime _prevTransitionStart = DateTime.MinValue;
+
         // Test override, set by POST /test.
         Activity? _forced;
         DateTime _forcedUntil = DateTime.MinValue;
@@ -170,6 +183,7 @@ namespace GoveeLights
             {
                 _previous = _current;
                 _current = resolved;
+                _prevTransitionStart = _transitionStart;    // before it is overwritten
                 _transitionStart = DateTime.UtcNow;
                 LastActivityAt = DateTime.UtcNow;
                 Log.Info("render_state", _current.ToString());
@@ -183,6 +197,7 @@ namespace GoveeLights
             var sinceTransition = (DateTime.UtcNow - _transitionStart).TotalMilliseconds;
             var t = _clock.Elapsed.TotalSeconds;
             var tInState = (DateTime.UtcNow - _transitionStart).TotalSeconds;
+            var tInPrevState = (DateTime.UtcNow - _prevTransitionStart).TotalSeconds;
 
             var fading = cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs;
             var mix = fading ? sinceTransition / cfg.Render.TransitionMs : 1.0;
@@ -205,8 +220,10 @@ namespace GoveeLights
                 {
                     // Render the outgoing state too and blend, so motion cross-fades
                     // rather than snapping. Only inside the TransitionMs window.
+                    // tInPrevState, not tInState: the outgoing state's clock did not
+                    // restart just because we left it.
                     var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
-                    var prevFrame = Effects.Render(prev, t, tInState, segs);
+                    var prevFrame = Effects.Render(prev, t, tInPrevState, segs);
                     frame = Effects.Blend(prevFrame, frame, mix);
                 }
 

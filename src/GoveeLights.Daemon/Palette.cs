@@ -22,7 +22,9 @@ namespace GoveeLights
 
     public static class Palette
     {
-        public static readonly string[] KnownEffects =
+        // Not exported: only Norm reads it, and a public string[] hands every caller a
+        // writable copy of the effect list.
+        static readonly string[] KnownEffects =
             { "solid", "breathe", "pulse", "blink", "chase", "comet", "wipe", "progress", "sparkle", "rainbow" };
         static readonly string[] KnownDirections = { "forward", "reverse", "pingpong" };
         static readonly string[] KnownEasings    = { "linear", "sine", "cubic", "expo" };
@@ -84,17 +86,16 @@ namespace GoveeLights
             }
         }
 
-        /// <summary>Layers, weakest first: effect defaults, state defaults, config, device.
-        /// A non-null field in a later layer wins; null means inherit.</summary>
-        public static ResolvedStyle Resolve(DaemonConfig cfg, DeviceConfig device, Activity state)
-        {
-            return ResolveStyle(BuildLayers(cfg, device, state));
-        }
-
-        /// <summary>Segment-aware resolve. A spatial effect has nothing to paint on a
-        /// device with one zone, so on segments &lt;= 1 it re-resolves with Effect forced
-        /// to "breathe" - which lets breathe's own EffectDefaults layer (Depth 0.35) apply,
-        /// instead of Effects re-deriving that floor for a fallback it never asked for.</summary>
+        /// <summary>Segment-aware resolve from a config, and the only public way in that
+        /// takes one. Layers, weakest first: effect defaults, state defaults, config,
+        /// device - a non-null field in a later layer wins; null means inherit.
+        ///
+        /// A spatial effect has nothing to paint on a device with one zone, so on
+        /// segments &lt;= 1 it re-resolves with Effect forced to "breathe" - which lets
+        /// breathe's own EffectDefaults layer (Depth 0.35) apply, instead of Effects
+        /// re-deriving that floor for a fallback it never asked for. There is deliberately
+        /// no segment-blind overload: one shipped on this branch, and every caller that
+        /// reached for it hard-cut single-zone devices to black.</summary>
         public static ResolvedStyle ResolveFor(DaemonConfig cfg, DeviceConfig device, Activity state, int segments)
         {
             return ResolveStyleFor(segments, BuildLayers(cfg, device, state));
@@ -117,7 +118,9 @@ namespace GoveeLights
             return layers.ToArray();
         }
 
-        public static ResolvedStyle ResolveStyle(params StateStyle[] layers)
+        // Private on purpose: callers must go through a segment-aware entry point so the
+        // single-zone spatial fallback cannot be bypassed.
+        static ResolvedStyle ResolveStyle(params StateStyle[] layers)
         {
             if (layers == null) layers = new StateStyle[0];
 
@@ -130,13 +133,13 @@ namespace GoveeLights
 
             var r = new ResolvedStyle();
             r.Effect = effect;
-            r.Color  = Rgb.Parse(Pick(all, x => x.Color), new Rgb(120, 120, 120));
+            r.Color  = NormColor(Pick(all, x => x.Color), new Rgb(120, 120, 120), "Color");
 
             // "none" is an explicit clear: without it, a stronger layer could never
             // revert an inherited Color2 back to single-colour once a weaker layer sets it.
             var c2 = Pick(all, x => x.Color2);
             r.HasColor2 = !string.IsNullOrEmpty(c2) && !string.Equals(c2, "none", StringComparison.OrdinalIgnoreCase);
-            r.Color2 = r.HasColor2 ? Rgb.Parse(c2, new Rgb(0, 0, 0)) : new Rgb(0, 0, 0);
+            r.Color2 = r.HasColor2 ? NormColor(c2, new Rgb(0, 0, 0), "Color2") : new Rgb(0, 0, 0);
 
             r.Hz = PickN(all, x => x.Hz, 0.6);
             if (r.Hz <= 0) r.Hz = 0.6;               // Offline stores Hz 0; solid ignores it anyway
@@ -206,14 +209,32 @@ namespace GoveeLights
             var v = value.Trim().ToLowerInvariant();
             for (int i = 0; i < known.Length; i++) if (known[i] == v) return v;
 
-            var tag = field + ":" + v;
+            WarnOnce(field, value, dflt);
+            return dflt;
+        }
+
+        /// <summary>Colour had been the one style field whose typos were invisible: a
+        /// malformed "#FF00" just became grey, while a malformed Effect or Easing already
+        /// announced itself. Same warn-once path, so it reads identically in the log.</summary>
+        static Rgb NormColor(string value, Rgb dflt, string field)
+        {
+            if (string.IsNullOrEmpty(value)) return dflt;
+            Rgb parsed;
+            if (Rgb.TryParse(value, out parsed)) return parsed;
+
+            WarnOnce(field, value, dflt.ToHex());
+            return dflt;
+        }
+
+        static void WarnOnce(string field, string value, string used)
+        {
+            var tag = field + ":" + (value ?? "").Trim().ToLowerInvariant();
             lock (_warned)
             {
-                if (_warned.Add(tag))
-                    Log.Warn("style_unknown_value", "falling back to default",
-                        new Dictionary<string, object> { { "field", field }, { "value", value }, { "using", dflt } });
+                if (!_warned.Add(tag)) return;
             }
-            return dflt;
+            Log.Warn("style_unknown_value", "falling back to default",
+                new Dictionary<string, object> { { "field", field }, { "value", value }, { "using", used } });
         }
     }
 }

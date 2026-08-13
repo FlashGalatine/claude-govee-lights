@@ -12,8 +12,8 @@ ten different meanings for "reverse." That pipeline is not perfectly uniform, th
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Color` | `#RRGGBB` | The primary colour. Ignored by `rainbow`. |
-| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. Ignored by `rainbow`. |
+| `Color` | `#RRGGBB` | The primary colour. Ignored by `rainbow`. Must be exactly six hex digits, with or without the leading `#`; anything else (`#FF00`, `red`) falls back to grey `#787878` and logs a `style_unknown_value` warning. |
+| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. Ignored by `rainbow`. An unparseable value falls back to black `#000000` and warns, exactly as `Color` does. |
 | `Effect` | name | See the table below. An unrecognised name falls back to `solid` — see "Defaults and out-of-range values" below. |
 | `Hz` | number | Rate. Cycles per second for time-based effects; twinkle steps per second for `sparkle`. Defaults to `0.6`; a value `<= 0` also falls back to `0.6`. |
 | `Brightness` | 0–100 | Device brightness. Only sent when it resolves `> 0` — both `-1` (the default) and `0` leave the device's brightness alone. When it is sent, it is also capped by that device's own `BrightnessCap`. |
@@ -42,12 +42,21 @@ time:
 - **Present but nonsensical values** are corrected rather than left broken: `Hz`,
   `Tail` and `FullSeconds` fall back to their defaults if `<= 0`; `Depth` is clamped
   into `0..1`; an unrecognised `Effect`, `Direction` or `Easing` falls back to
-  `solid`, `forward` or `linear` respectively.
+  `solid`, `forward` or `linear` respectively; and an unparseable `Color` or `Color2`
+  falls back to grey `#787878` or black `#000000`.
 
-An unrecognised `Effect`, `Direction` or `Easing` also logs a `style_unknown_value`
-warning, once per distinct bad value — worth checking `/govee logs` after
-hand-editing a config, since a typo does not otherwise announce itself beyond the
-lights not doing what you expected.
+Every one of those corrections logs a `style_unknown_value` warning, once per
+distinct bad value — worth checking `/govee logs` after hand-editing a config, since
+a typo does not otherwise announce itself beyond the lights not doing what you
+expected. Under `--dump-frames` the same warnings go to **stderr**, leaving the frame
+stream on stdout clean.
+
+The *keys* of a `States` map are checked too. A key that is not one of the activity
+names (`Idle`, `Thinking`, `ToolRead`, `ToolEdit`, `ToolShell`, `ToolWeb`, `ToolMcp`,
+`ToolAgent`, `ToolOther`, `Compacting`, `WaitingUser`, `Error`, `Done`, `Offline`) is
+never looked up, so it is kept but logged once as `config_unknown_state`. Key
+matching itself is case-insensitive: `"thinking"` and `"Thinking"` are the same
+state.
 
 ## Effects
 
@@ -104,7 +113,11 @@ file, `--from <state>` dumps a cross-fade, and `--fps <n>` sets the sample rate
 
 A few flags interact in ways that are not obvious: `--style` makes `--state`,
 `--config` and `--device` inert — a literal style resolves with no config involved at
-all. `--device` only has anything to look up when `--config` is also given. And
-`--from` always resolves the earlier state against the built-in defaults, ignoring
-both `--config` and `--device`, so a dumped cross-fade never reflects your config even
-when the target state does.
+all. `--device` only has anything to look up when `--config` is also given; with a
+config present, a `--device` name that is not in it is an error (stderr, exit 2)
+rather than a silent fall-back to the global style. And `--from` always resolves the
+earlier state against the built-in defaults, ignoring both `--config` and `--device`,
+so a dumped cross-fade never reflects your config even when the target state does.
+
+Warnings go to stderr and frames to stdout, so redirecting only stdout still lets a
+typo reach you.
