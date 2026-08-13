@@ -288,14 +288,26 @@ namespace GoveeLights
             Theme t; string err;
             if (!Themes.TryLoad(raw.ToString(), out t, out err)) return HttpResponse.Text(400, err);
 
-            // See _saveGate: ResetAll plus the Set loop below is exactly the kind of
-            // multi-call sequence that must not straddle a concurrent /styles/set or
-            // /styles/save - a set landing between the reset and the theme's own patches
-            // would either be wiped by the reset or overwritten by a later theme key.
+            // A theme with no states themes nothing - under total-apply semantics below
+            // that would silently reduce to "clear everything", which is not what
+            // "apply theme X" means even if X is degenerate.
+            if (t.States.Count == 0) return HttpResponse.Text(400, "theme '" + t.Name + "' has no states to apply");
+
+            // See _saveGate: this whole block is exactly the kind of multi-call sequence
+            // that must not straddle a concurrent /styles/set or /styles/save.
             lock (_saveGate)
             {
-                // A theme is a complete palette, so applying one is total - reset first, or
-                // states the theme does not mention would keep the previous theme's values.
+                // A theme is a complete palette, so applying one is total: it replaces
+                // whatever was pending, not just the keys this theme happens to mention.
+                // ResetAll alone is NOT enough - it only adds to _cleared and never
+                // touches _pending, so a patch left over from a *previous* theme (or a
+                // plain /styles/set) would otherwise survive underneath: merged field-wise
+                // into a state this theme does patch (Set merges onto the existing pending
+                // entry), or applied on its own, over the built-in default, for a state
+                // this theme does not mention at all. Revert() clears both _pending and
+                // _cleared outright; ResetAll(_cfg()) then re-suppresses the config layer
+                // for the fresh start a themed state is supposed to get.
+                _styles.Revert();
                 _styles.ResetAll(_cfg());
                 foreach (var kv in t.States)
                 {
@@ -304,6 +316,21 @@ namespace GoveeLights
                     // alone would accept a raw numeric string or a comma list.
                     Activity a;
                     if (!Enum.TryParse(kv.Key, true, out a) || !Enum.IsDefined(typeof(Activity), a)) continue;
+
+                    // Same reasoning as /styles/set's Validate call: a theme file on disk
+                    // is exactly as capable of carrying a typo'd Hz or an out-of-range
+                    // Brightness as a request body is, and unlike a typed command nobody
+                    // notices a bad value sitting in a saved theme file. A skipped state
+                    // just falls back to its built-in default instead of silently letting
+                    // an unchecked value past the same ceilings /styles/set enforces.
+                    string valErr = null;
+                    if (kv.Value == null || !Validate(kv.Value, out valErr))
+                    {
+                        Log.Warn("theme_invalid_state", "skipping unvalidated state in theme",
+                            new Dictionary<string, object> { { "theme", t.Name }, { "state", a.ToString() },
+                                { "reason", kv.Value == null ? "null style" : valErr } });
+                        continue;
+                    }
                     _styles.Set(a.ToString(), kv.Value);
                 }
             }
@@ -343,9 +370,12 @@ namespace GoveeLights
             }
 
             // A fresh install (or one where nothing has ever been set) merges to an empty
-            // map - that is a client-observable "nothing to save yet", not a server fault,
-            // so it is caught here rather than falling through to TrySave's generic 500.
-            if (states.Count == 0) return HttpResponse.Text(400, "nothing to save: no styles are set yet");
+            // map - that is the same "nothing to save" condition /styles/save reports as a
+            // no-op 200 rather than an error, so this answers the same way instead of
+            // falling through to TrySave's generic 500. The Task 6 CLI has to handle both
+            // endpoints' "nothing to do" case identically either way, so match the sibling.
+            if (states.Count == 0)
+                return HttpResponse.Json("{\"ok\":true,\"saved\":false,\"reason\":\"nothing to save\"}");
 
             string err;
             if (!Themes.TrySave(name, states, out err)) return HttpResponse.Text(500, "theme save failed: " + err);
@@ -366,9 +396,16 @@ namespace GoveeLights
             object rawHold;
             if (body.TryGetValue("holdMs", out rawHold) && rawHold != null)
             {
-                int parsed;
-                if (int.TryParse(rawHold.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
-                    holdMs = Math.Max(500, Math.Min(60000, parsed));
+                // JavaScriptSerializer hands back an Int64 for a JSON integer bigger than
+                // Int32.MaxValue, and a plain double for "500.5" - int.TryParse silently
+                // fails on both, and used to fall through to the 8000ms default instead of
+                // being clamped, so a client sending an oversized or fractional holdMs got
+                // a *shorter* preview than one that merely asked for something too big.
+                // Parse as double, which covers every shape a JSON number can take here.
+                double parsed;
+                if (double.TryParse(rawHold.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)
+                    && !double.IsNaN(parsed) && !double.IsInfinity(parsed))
+                    holdMs = (int)Math.Max(500.0, Math.Min(60000.0, parsed));
             }
 
             string state, stateErr;
@@ -385,6 +422,11 @@ namespace GoveeLights
                 if (!Validate(patch, out err)) return HttpResponse.Text(400, err);
             }
 
+            // TryState only ever hands back a canonical, Enum.IsDefined name (see its own
+            // comment), so this TryParse cannot fail today - but that is a dependency on
+            // TryState's contract, not a redundant check, so it is called out rather than
+            // silently discarded. If TryState ever loosened, Activity 0 (Offline) is
+            // exactly the kind of wrong-but-plausible fallback that would pass review.
             Activity a;
             Enum.TryParse(state, true, out a);
 
