@@ -482,6 +482,21 @@ git add src/GoveeLights.Daemon/StyleStore.cs src/GoveeLights.Daemon/Palette.cs \
 git commit -m "Add the pending style layer between config and device"
 ```
 
+**Amended during review.** The three-valued `_pending` model above (absent | null |
+patch) cannot represent "cleared *and* patched": a `Set` after a `Reset` lifted the
+tombstone, so both the resolve and `Merged()` restored config values the user had just
+cleared — and Tasks 4-6 drive exactly that sequence. `StyleStore` now holds a separate
+`HashSet<string> _cleared` beside `_pending`, both under the same lock, with
+`bool IsCleared(string)` exposed; `Reset`/`ResetAll` add to `_cleared` without touching
+patches, `Set` leaves `_cleared` alone, `Revert` clears both, `Merged` uses a null basis
+for cleared states, and `BuildLayers` skips `cfg.States` when `IsCleared(key)`. The
+repository is the authority; the code in this task's steps is the pre-fix version.
+
+A consequence worth knowing in Task 5: `ThemeApply` calls `ResetAll()` then `Set` per
+state, so every state is cleared *and* patched — `Merged()` therefore writes each theme
+style exactly, with no stray fields inherited from whatever config the theme replaced.
+That is the correct reading of "applying a theme is total".
+
 ---
 
 ### Task 2: The config splicer
