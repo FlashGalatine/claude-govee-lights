@@ -76,6 +76,13 @@ first run, seeded with the GUID from `Govee-API-GUID.txt`. It hot-reloads on sav
 /govee restart    restart the daemon
 /govee logs       tail the daemon log
 /govee doctor     diagnose a broken setup
+/govee styles     show every state's colour and effect, and its source
+/govee set        change a state's style — applies live, unsaved until save
+/govee preview    try a style on the lights for a few seconds, unsaved
+/govee reset      clear a state (or --all) toward built-in — unsaved until save
+/govee save       write pending changes to config.json
+/govee revert     discard every pending change
+/govee theme      list | apply <name> | save <name>
 ```
 
 ## States
@@ -107,23 +114,33 @@ therefore render as one continuous cyan, not twenty flashes.
 
 Each activity state has its own colour and animation. Change one from the prompt:
 
-```
-/govee styles                                    show everything, and where each value came from
-/govee set Thinking --color FF0000 --hz 2        apply it live
-/govee save                                      keep it
-```
+| Command | What it does |
+|---|---|
+| `/govee styles` | show everything, and where each value came from |
+| `/govee set Thinking --color FF0000 --hz 2` | apply it live |
+| `/govee save` | keep it |
 
-`set` takes effect immediately but writes nothing — experiment freely and
-`/govee revert` if you don't like it. `save` splices only the `States` block back
-into `%LOCALAPPDATA%\ClaudeGovee\config.json`, so your comments and every other
-setting survive untouched.
+`set` takes effect immediately but writes nothing — experiment freely. `/govee
+revert` undoes it, but note the blast radius: it discards *every* pending edit and
+every reset for every state, not just the one you just touched. `save` splices
+only the `States` block back into `%LOCALAPPDATA%\ClaudeGovee\config.json`, so your
+comments and every other setting survive untouched.
 
 `/govee preview Thinking --effect comet --tail 2.5` shows a style for a few
-seconds without changing anything at all, and `/govee reset Thinking` puts a
-state back to its built-in default.
+seconds without changing anything at all — nothing pending, nothing to revert.
+
+`/govee reset Thinking` is different: it clears the saved config's entry for that
+state, so the state falls back toward its built-in default — but it is itself an
+unsaved change, so `/govee save` is still what keeps it. And if a `set` patch is
+still pending for that state, `reset` does not erase it: clearing and patching are
+independent, so `reset` and `set` combine (in either order) into built-in *plus*
+your patch, not a clean built-in default.
 
 Whole palettes come as themes — `/govee theme list`, `/govee theme apply muted`,
-and `/govee theme save <name>` to keep your current setup as one.
+and `/govee theme save <name>` to keep your current setup as one. Applying a theme
+is total: it discards any unsaved edits, any state the theme doesn't mention falls
+back to built-in, and — like `set` and `reset` — the change is itself unsaved until
+`/govee save`.
 
 The config file is still there and still hot-reloads, if you prefer editing it:
 
@@ -141,8 +158,10 @@ do something varies by effect (`rainbow` ignores most of them; `Tail` only affec
 change one value without restating the rest. Individual devices can override any
 state via a `States` block inside their `Devices` entry.
 
-See [docs/EFFECTS.md](docs/EFFECTS.md) for the full reference, and run
-`/govee test <state>` to preview a state on your lights.
+See [docs/EFFECTS.md](docs/EFFECTS.md) for the full reference. To see a state on
+your lights: `/govee test <state>` forces whatever it currently resolves to for a
+few seconds, while `/govee preview <state> [flags]` shows a style you haven't
+applied yet — the two are not the same command.
 
 ## Configuration
 

@@ -27,12 +27,19 @@ Any field may be omitted. Omitted means *inherit*, and the layers are, strongest
 first:
 
 1. a device's own `States` entry (set inside that device's block in `Devices`)
-2. **unsaved edits** from `/govee set` or `/govee theme apply` — these sit exactly
-   where the global `States` block sits, which is why `/govee save` can write them
-   straight into it
+2. **unsaved edits** from `/govee set` or `/govee theme apply` — stronger than the
+   global `States` entry, weaker than a device's own override, which is why
+   `/govee save` can write them straight into the global block
 3. the global `States` entry in `config.json`
 4. the built-in default for that state
 5. the effect's own default
+
+`/govee reset` acts on layer 3, not layer 2: it removes a state's global `States`
+entry rather than adding anything of its own, so the state falls through to
+whatever survives beneath it — including a patch from `/govee set` still sitting in
+layer 2, if one is pending for that state. That is why `reset` and `set` combine,
+in either order, into built-in *plus* your patch rather than a clean built-in
+default.
 
 This is why you can set just `Hz` on one state and leave everything else alone, and
 why one device can override a single field of one state without restating the rest.

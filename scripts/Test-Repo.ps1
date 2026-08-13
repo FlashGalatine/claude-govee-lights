@@ -969,16 +969,26 @@ if (-not $exe) {
     } finally {
         Remove-Item -LiteralPath $themesScratch -Recurse -Force -ErrorAction SilentlyContinue
     }
-
-    # Documented verbs must exist in the CLI, or the README teaches commands that fail.
-    $cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
-    $missingVerbs = @()
-    foreach ($v in 'styles','set','reset','save','revert','preview','theme') {
-        if ($cliText -notmatch "(?m)^\s*'$v'\s*\{") { $missingVerbs += $v }
-    }
-    if ($missingVerbs.Count -eq 0) { Ok 'every documented verb exists in the CLI' }
-    else { No 'a documented verb is missing from the CLI' ($missingVerbs -join ', ') }
 }
+
+# Documented verbs must exist in the CLI, or the README teaches commands that fail.
+# A pure text check against Govee-Cli.ps1 - needs no build, so it runs unconditionally
+# rather than inside the $exe-gated block above, and still catches drift on the
+# documented no-build SKIP path.
+#
+# Matched at exactly 4 leading spaces: the top-level `switch ($Command)` cases (e.g.
+# `    'save' {`) sit at that indent, while the nested `theme` sub-switch's own
+# `'save' {` case sits three levels deeper at 12 spaces. `save` is the only verb name
+# that collides between the two switches - matching any leading whitespace would let
+# the nested case stand in for the top-level one and pass even if the real `save`
+# verb were deleted.
+$cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
+$missingVerbs = @()
+foreach ($v in 'styles','set','reset','save','revert','preview','theme') {
+    if ($cliText -notmatch "(?m)^    '$v'\s*\{") { $missingVerbs += $v }
+}
+if ($missingVerbs.Count -eq 0) { Ok 'every documented verb exists in the CLI' }
+else { No 'a documented verb is missing from the CLI' ($missingVerbs -join ', ') }
 
 # Shipping an example config that names an effect the engine does not implement
 # would render as solid, only warning once per distinct value in the daemon log
