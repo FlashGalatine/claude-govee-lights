@@ -74,9 +74,16 @@ namespace GoveeLights
         /// not look like a dead one.</summary>
         public int SessionTtlMinutes { get; set; } = 90;
 
-        /// <summary>Docs say 1 = gradient on; the internal field is named _gradientOffSkus,
-        /// implying the opposite. Both return 0, so this is exposed for visual tuning.</summary>
-        public int IsGradientOff { get; set; } = 1;
+        /// <summary>Settled by observation on 2026-08-13: the field name is the truthful
+        /// signal, not the DOCX. At 1, DeviceSegmentsColor is accepted (it returns "0" like
+        /// everything else) but the per-segment colours are flattened, so every spatial
+        /// effect - chase, comet, wipe, progress, sparkle, rainbow - renders as a uniform
+        /// pulse on real hardware. At 0 the segments light individually.
+        ///
+        /// Kept configurable because the polarity may well be SKU-dependent - the internal
+        /// list is named _gradientOffSkus, which only makes sense as a per-SKU exception
+        /// list - so a device that behaves the other way can still be driven.</summary>
+        public int IsGradientOff { get; set; } = 0;
 
         public RenderConfig Render { get; set; } = new RenderConfig();
         public List<DeviceConfig> Devices { get; set; } = new List<DeviceConfig>();

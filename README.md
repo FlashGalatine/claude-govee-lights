@@ -170,7 +170,7 @@ applied yet — the two are not the same command.
   "Enabled": true,
   "ApiGuid": "...",                 // Govee Desktop ▸ Settings ▸ API
   "Port": 17321,                    // must match hooks/hooks.json if changed
-  "IsGradientOff": 1,               // gradient polarity; flip if segments look wrong
+  "IsGradientOff": 0,               // 0 lights segments individually; 1 flattens them
   "RestColor": "#FFD9A0",
   "OnSessionEnd": "rest",           // rest | off | hold
   "QuietHours": { "Enabled": false, "Start": "23:30", "End": "08:00" },
