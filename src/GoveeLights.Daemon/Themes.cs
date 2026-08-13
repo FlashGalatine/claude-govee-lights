@@ -32,18 +32,50 @@ namespace GoveeLights
     /// </summary>
     public static class Themes
     {
+        /// <summary>Test-only escape hatch: null in production, where UserDir is always
+        /// the live %LOCALAPPDATA% folder the running daemon also uses. Test-Repo.ps1
+        /// sets this (via --themes-dir) so theme tests read and write a scratch
+        /// directory instead of colliding with whatever the daemon has on the machine
+        /// actually running the suite. Internal - nothing but the harness may set it.</summary>
+        internal static string UserDirOverride;
+
         public static string UserDir
         {
-            get { return Path.Combine(DaemonConfig.DefaultDir, "themes"); }
+            get { return UserDirOverride ?? Path.Combine(DaemonConfig.DefaultDir, "themes"); }
         }
 
-        static readonly Regex NamePattern = new Regex(@"^[A-Za-z0-9_-]{1,32}$", RegexOptions.Compiled);
+        // \A...\z, not ^...$: .NET's $ matches before a single trailing "\n" even
+        // without RegexOptions.Multiline, so "mono\n" would otherwise validate and
+        // then land in a filename with a newline baked into it.
+        static readonly Regex NamePattern = new Regex(@"\A[A-Za-z0-9_-]{1,32}\z", RegexOptions.Compiled);
+
+        // Windows reserves these as device names regardless of extension - CON, NUL
+        // and friends. Nothing in NamePattern excludes them (they are all plain
+        // letters/digits), and a name that needs to be a filename should not be able
+        // to name a device instead.
+        static readonly HashSet<string> ReservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
 
         /// <summary>A theme name becomes a filename, so it is validated rather than
         /// sanitised - a name that needs cleaning up is a name the user should retype.</summary>
         public static bool IsValidName(string name)
         {
-            return !string.IsNullOrEmpty(name) && NamePattern.IsMatch(name);
+            return !string.IsNullOrEmpty(name) && NamePattern.IsMatch(name) && !ReservedNames.Contains(name);
+        }
+
+        /// <summary>True when a theme names exactly the fourteen Activity states - no
+        /// gap, no misspelling. A theme with the right *count* but a state named
+        /// "ToolShel" would silently fall back to the built-in default for ToolShell;
+        /// counting States.Count cannot see that, only the key set can.</summary>
+        public static bool IsComplete(Dictionary<string, StateStyle> states)
+        {
+            if (states == null) return false;
+            var want = new HashSet<string>(Enum.GetNames(typeof(Activity)), StringComparer.OrdinalIgnoreCase);
+            return want.SetEquals(states.Keys);
         }
 
         public static Dictionary<string, Theme> BuiltIn()
@@ -201,19 +233,28 @@ namespace GoveeLights
             if (!IsValidName(name)) { error = "invalid theme name; use letters, digits, dash or underscore"; return false; }
             if (states == null || states.Count == 0) { error = "nothing to save"; return false; }
 
+            string tmp = null;
             try
             {
                 Directory.CreateDirectory(UserDir);
                 var t = new Theme { Name = name, Description = "Saved theme", States = states };
                 var json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.Serialize(t);
                 var path = Path.Combine(UserDir, name + ".json");
-                var tmp = path + ".tmp";
+                tmp = path + ".tmp";
                 File.WriteAllText(tmp, json);
                 if (File.Exists(path)) File.Replace(tmp, path, null);
                 else File.Move(tmp, path);
                 return true;
             }
-            catch (Exception ex) { error = ex.Message; return false; }
+            catch (Exception ex)
+            {
+                // Don't leave a stray .tmp beside the user's themes if the final
+                // replace/move step itself throws - same defect ConfigWriter.TrySave
+                // guards against, for the same reason (a locked file, a scan mid-flight).
+                try { if (tmp != null && File.Exists(tmp)) File.Delete(tmp); } catch { /* best effort */ }
+                error = ex.Message;
+                return false;
+            }
         }
     }
 }

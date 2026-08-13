@@ -845,49 +845,130 @@ if (-not $exe) {
     # ---- themes ------------------------------------------------------------
     # A theme is a complete palette: applying one must not leave residue from the
     # last, so every built-in has to name every state.
-    $themeRows = @(Invoke-Dump @('--list-themes') | Where-Object { $_ -and $_ -notlike 'name,*' })
-    $stateCount = (@(Invoke-Dump @('--resolve-states')) | Where-Object { $_ -and $_ -notlike 'state,*' }).Count
+    #
+    # Every theme-touching call below passes --themes-dir pointed at a scratch
+    # directory, not the live %LOCALAPPDATA% themes folder --list-themes/--save-theme
+    # touch by default. That folder belongs to whatever the daemon has installed on
+    # the machine running this suite - without isolation, a leftover user theme there
+    # (or one this very test saves) could shadow a built-in and make a perfectly good
+    # built-in look broken, which is exactly the bug under test in the shadow checks
+    # below, deliberately, in a directory nothing else can see.
+    $themesScratch = Join-Path ([System.IO.Path]::GetTempPath()) ("govee-themes-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $themesScratch -Force | Out-Null
+    try {
+        $themeRows = @(Invoke-Dump @('--list-themes', '--themes-dir', $themesScratch) | Where-Object { $_ -and $_ -notlike 'name,*' })
+        $stateCount = (@(Invoke-Dump @('--resolve-states')) | Where-Object { $_ -and $_ -notlike 'state,*' }).Count
 
-    $builtins = @($themeRows | Where-Object { $_.Split(',')[1] -eq 'yes' })
-    if ($builtins.Count -ge 4) { Ok "built-in themes present ($($builtins.Count))" }
-    else { No 'expected at least four built-in themes' ($builtins -join '; ') }
+        $builtins = @($themeRows | Where-Object { $_.Split(',')[1] -eq 'yes' })
+        if ($builtins.Count -ge 4) { Ok "built-in themes present ($($builtins.Count))" }
+        else { No 'expected at least four built-in themes' ($builtins -join '; ') }
 
-    $incomplete = @($builtins | Where-Object { [int]$_.Split(',')[2] -ne $stateCount })
-    if ($incomplete.Count -eq 0) { Ok "every built-in theme covers all $stateCount states" }
-    else { No 'a built-in theme is missing states' ($incomplete -join '; ') }
+        # "complete" (column 5) is Themes.IsComplete: the theme's own State *names*
+        # compared against the real Activity set, not a bare count. A theme with
+        # fourteen keys and one misspelled (ToolShel instead of ToolShell) has the
+        # right count and the wrong set - that state would silently fall back to the
+        # built-in default, and a count-only check cannot see it.
+        $incomplete = @($builtins | Where-Object { $_.Split(',')[5] -ne 'yes' })
+        if ($incomplete.Count -eq 0) { Ok "every built-in theme names exactly the $stateCount Activity states" }
+        else { No 'a built-in theme is missing or misnames a state' ($incomplete -join '; ') }
 
-    # Palette.Norm always resolves to a *known* effect (it falls back to a default
-    # rather than ever emitting a value it doesn't recognise), so a typo in a theme's
-    # raw Effect field can never show up in --resolve-states' resolved CSV - checking
-    # that column would pass even with a bogus effect baked into a shipped theme.
-    # What the typo DOES do is trip Palette's WarnOnce, and --dump-frames routes that
-    # straight to stderr (Log.AlsoConsole/ConsoleToStderr, set for the whole dump mode).
-    # That is the only place a themed typo is observable, so check there instead.
-    function Invoke-DumpCapture {
-        param([string[]] $DumpArgs)
-        $tmpOut = [System.IO.Path]::GetTempFileName()
-        $tmpErr = [System.IO.Path]::GetTempFileName()
-        try {
-            $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
-            Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait `
-                -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr | Out-Null
-            return [PSCustomObject]@{ StdErr = (Get-Content $tmpErr -Raw) }
-        } finally { Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
-    }
-    $themeEffectsBad = @()
-    foreach ($t in @('default','muted','vivid','mono')) {
-        $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t)
-        if ($cap.StdErr -match '"evt":"style_unknown_value"' -and $cap.StdErr -match '"field":"Effect"') {
-            $themeEffectsBad += $t
+        # Palette.Norm always resolves to a *known* effect (it falls back to a default
+        # rather than ever emitting a value it doesn't recognise), so a typo in a
+        # theme's raw Effect field can never show up in --resolve-states' resolved CSV
+        # - checking that column would pass even with a bogus effect baked into a
+        # shipped theme. What the typo DOES do is trip Palette's WarnOnce, and
+        # --dump-frames routes that straight to stderr (Log.AlsoConsole/ConsoleToStderr,
+        # set for the whole dump mode). That is the only place a themed typo is
+        # observable - but absence of the warning only means something once the run is
+        # confirmed to have actually resolved every state. Without the exit-code and
+        # row-count gate, a deleted --theme flag, a TryLoad that started failing, or the
+        # process dying early would all leave stderr just as silent as a clean theme
+        # does, and this would report PASS for a --theme path that never ran at all -
+        # and nothing else in this suite drives --theme, so nothing else would catch it.
+        function Invoke-DumpCapture {
+            param([string[]] $DumpArgs)
+            $tmpOut = [System.IO.Path]::GetTempFileName()
+            $tmpErr = [System.IO.Path]::GetTempFileName()
+            try {
+                $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
+                $proc = Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait -PassThru `
+                    -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+                return [PSCustomObject]@{
+                    ExitCode = $proc.ExitCode
+                    StdOut   = @(Get-Content $tmpOut)
+                    StdErr   = (Get-Content $tmpErr -Raw)
+                }
+            } finally { Remove-Item -LiteralPath $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
         }
-    }
-    if ($themeEffectsBad.Count -eq 0) { Ok 'every built-in theme names only known effects' }
-    else { No 'a built-in theme names an unknown effect' ($themeEffectsBad -join ', ') }
+        $themeEffectsBad = @()
+        foreach ($t in @('default','muted','vivid','mono')) {
+            $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t)
+            $rows = @($cap.StdOut | Where-Object { $_ -and $_ -notlike 'state,*' })
+            if ($cap.ExitCode -ne 0 -or $rows.Count -ne $stateCount) {
+                $themeEffectsBad += "$t (did not resolve: exit=$($cap.ExitCode) rows=$($rows.Count))"
+            } elseif ($cap.StdErr -match '"evt":"style_unknown_value"' -and $cap.StdErr -match '"field":"Effect"') {
+                $themeEffectsBad += $t
+            }
+        }
+        if ($themeEffectsBad.Count -eq 0) { Ok 'every built-in theme names only known effects' }
+        else { No 'a built-in theme names an unknown effect (or --theme failed to resolve)' ($themeEffectsBad -join ', ') }
 
-    # Name validation is a path guard, not cosmetics.
-    $badNames = @(Invoke-Dump @('--check-theme-name', '../evil'))
-    if ($badNames -join '' -match 'invalid') { Ok 'theme names reject path traversal' }
-    else { No 'theme name validation accepted ../evil' ($badNames -join ' ') }
+        # A theme name becomes a filename - IsValidName is a path guard, not cosmetics.
+        # A single case like ../evil only proves the guard blocks slash-based
+        # traversal; a regex weakened to reject nothing but slashes would still pass
+        # that one check. Cover the other ways a "sanitise later" guard tends to leak:
+        # a bare "..", a backslash form, a drive-relative name, a Windows reserved
+        # device name, and .NET's own "$ matches before a trailing newline" surprise
+        # (why the fix uses \A...\z instead of ^...$).
+        $badNames = @('..', '..\evil', 'a\b', 'C:foo', 'CON', "mono`n")
+        $accepted = @()
+        foreach ($n in $badNames) {
+            $r = @(Invoke-Dump @('--check-theme-name', $n)) -join ''
+            if ($r -notmatch 'invalid') { $accepted += $n }
+        }
+        if ($accepted.Count -eq 0) { Ok 'theme name validation rejects traversal, device names, and the trailing-newline edge case' }
+        else { No 'theme name validation accepted a name it should have refused' ($accepted -join ', ') }
+
+        # ---- user themes: TrySave and TryLoad's file branch, otherwise untouched ----
+        # Nothing above ever calls TrySave, or exercises TryLoad's File.Exists branch -
+        # every theme read so far has come from BuiltIn(). Round-trip a fresh name
+        # through --save-theme and back through --resolve-states --theme to prove a
+        # theme actually gets written to disk and actually gets read back correctly.
+        $rtStates = '{"Thinking":{"Color":"#0A0B0C","Effect":"pulse"}}'
+        $saveOut = Invoke-Dump @('--save-theme', 'roundtrip-check', '--states', $rtStates, '--themes-dir', $themesScratch)
+        $rtRow = @(Invoke-Dump @('--resolve-states', '--theme', 'roundtrip-check', '--themes-dir', $themesScratch) |
+                   Where-Object { $_ -like 'Thinking,*' })
+        if (($saveOut -join '') -match 'saved' -and $rtRow -and $rtRow[0].Split(',')[1] -eq 'pulse' -and
+            $rtRow[0].Split(',')[2] -eq '#0A0B0C') {
+            Ok 'a saved user theme round-trips through TrySave and TryLoad'
+        } else { No 'a saved user theme did not round-trip' ("save=$saveOut resolve=$rtRow") }
+
+        # ---- shadowing: both the list path and the load path ------------------------
+        # A user theme named after a built-in must win on load (TryLoad's file branch
+        # is checked before the BuiltIn() fallback) and must be visible as such on the
+        # list: List() marks the built-in row Shadowed, ListThemes must actually print
+        # that flag, and the built-in row's own state count must not be the user file's
+        # count in disguise - that swap is exactly the bug the review caught, where a
+        # three-state user "mono" made the built-in "mono" row report three states.
+        $shadowStates = '{"Idle":{"Color":"#123456"}}'
+        Invoke-Dump @('--save-theme', 'mono', '--states', $shadowStates, '--themes-dir', $themesScratch) | Out-Null
+        $shadowRows = @(Invoke-Dump @('--list-themes', '--themes-dir', $themesScratch) | Where-Object { $_ -like 'mono,*' })
+        $builtinMono = $shadowRows | Where-Object { $_.Split(',')[1] -eq 'yes' }
+        $userMono    = $shadowRows | Where-Object { $_.Split(',')[1] -eq 'no' }
+        if ($shadowRows.Count -eq 2 -and $builtinMono -and $userMono -and
+            $builtinMono.Split(',')[4] -eq 'yes' -and $builtinMono.Split(',')[2] -eq "$stateCount" -and
+            $userMono.Split(',')[2] -eq '1') {
+            Ok '--list-themes marks a shadowed built-in without leaking the user theme''s state count onto it'
+        } else { No '--list-themes mishandled a shadowed built-in' ($shadowRows -join '; ') }
+
+        $shadowLoadRow = @(Invoke-Dump @('--resolve-states', '--theme', 'mono', '--themes-dir', $themesScratch) |
+                            Where-Object { $_ -like 'Idle,*' })
+        if ($shadowLoadRow -and $shadowLoadRow[0].Split(',')[2] -eq '#123456') {
+            Ok 'a user theme shadows a same-named built-in on the load path'
+        } else { No 'a user theme did not shadow a same-named built-in on load' ($shadowLoadRow -join '; ') }
+    } finally {
+        Remove-Item -LiteralPath $themesScratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Shipping an example config that names an effect the engine does not implement

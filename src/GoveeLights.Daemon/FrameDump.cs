@@ -28,10 +28,18 @@ namespace GoveeLights
             Log.AlsoConsole = true;
             Log.ConsoleToStderr = true;
 
+            // Every mode below that touches Themes must see this before it runs: the
+            // production default is the live %LOCALAPPDATA% folder the running daemon
+            // also uses, so a test suite writing themes with no override would collide
+            // with whatever is actually installed on the machine running it.
+            var themesDir = Arg(args, "--themes-dir", null);
+            if (!string.IsNullOrEmpty(themesDir)) Themes.UserDirOverride = themesDir;
+
             if (HasFlag(args, "--list-known")) return ListKnown();
             if (HasFlag(args, "--resolve-states")) return ResolveStates(args);
             if (HasFlag(args, "--splice-states")) return SpliceStates(args);
             if (HasFlag(args, "--list-themes")) return ListThemes();
+            if (HasFlag(args, "--save-theme")) return SaveTheme(args);
             if (HasFlag(args, "--check-theme-name"))
             {
                 var n = Arg(args, "--check-theme-name", null);
@@ -155,23 +163,69 @@ namespace GoveeLights
         }
 
         /// <summary>Every theme, built-in and user, so the CLI can list what is available
-        /// without duplicating Themes' own notion of what "available" means.</summary>
+        /// without duplicating Themes' own notion of what "available" means.
+        ///
+        /// A built-in row's States must come from BuiltIn() directly, not TryLoad: when
+        /// a user theme shadows a built-in of the same name, TryLoad prefers the user
+        /// file, so routing the "builtin=yes" row's count through it would report the
+        /// *user* theme's state count against the built-in's name - a user theme saved
+        /// with three states would make a complete built-in look broken. Shadowed and
+        /// complete both surface here for the same reason "states" does: so a caller can
+        /// tell what is actually in force without loading every theme itself.</summary>
         static int ListThemes()
         {
+            var builtin = Themes.BuiltIn();
             var w = Console.Out;
-            w.WriteLine("name,builtin,states,description");
+            w.WriteLine("name,builtin,states,description,shadowed,complete");
             foreach (var info in Themes.List())
             {
-                Theme t; string err;
-                var count = Themes.TryLoad(info.Name, out t, out err) && t.States != null ? t.States.Count : 0;
+                Dictionary<string, StateStyle> states;
+                if (info.Builtin)
+                {
+                    Theme bt;
+                    states = builtin.TryGetValue(info.Name, out bt) ? bt.States : null;
+                }
+                else
+                {
+                    Theme t; string err;
+                    states = Themes.TryLoad(info.Name, out t, out err) ? t.States : null;
+                }
+                var count = states != null ? states.Count : 0;
                 w.WriteLine(string.Join(",", new[]
                 {
                     info.Name, info.Builtin ? "yes" : "no",
                     count.ToString(CultureInfo.InvariantCulture),
-                    (info.Description ?? "").Replace(",", " ")
+                    (info.Description ?? "").Replace(",", " "),
+                    info.Shadowed ? "yes" : "no",
+                    Themes.IsComplete(states) ? "yes" : "no"
                 }));
             }
             w.Flush();
+            return 0;
+        }
+
+        /// <summary>Write a theme to disk through Themes.TrySave, so the save path - the
+        /// one piece of theme I/O nothing else in this file exercises - is reachable
+        /// without hardware. --states takes the same shape --splice-states' --states
+        /// does: a literal state-name to StateStyle map.</summary>
+        static int SaveTheme(string[] args)
+        {
+            var name = Arg(args, "--save-theme", null);
+            var statesJson = Arg(args, "--states", null);
+            if (string.IsNullOrEmpty(statesJson)) { Console.Error.WriteLine("--save-theme needs --states"); return 2; }
+
+            Dictionary<string, StateStyle> parsed;
+            try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(statesJson); }
+            catch (Exception ex) { Console.Error.WriteLine("bad --states: " + ex.Message); return 2; }
+
+            string error;
+            if (!Themes.TrySave(name, parsed, out error))
+            {
+                Console.Error.WriteLine("save failed: " + error);
+                return 2;
+            }
+            Console.Out.WriteLine("saved");
+            Console.Out.Flush();
             return 0;
         }
 
