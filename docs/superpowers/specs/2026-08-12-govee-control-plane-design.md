@@ -118,11 +118,20 @@ comments, key order, whitespace, `_examples_states`.
 This is a hand-rolled splicer writing the user's file, so it carries three
 safeguards:
 
-- **Round-trip validation before the write lands.** Deserialize the spliced
-  result and confirm the `States` block matches what was intended. If it does
-  not parse, or does not match, abort and write nothing; `/govee save` reports
-  the failure and `_pending` stays intact. A splicer that silently corrupts a
-  config is worse than one that refuses.
+- **Round-trip validation before the write lands**, in three parts. The spliced
+  result must parse; the states it wrote must re-render to exactly the block
+  that was spliced in; and **every byte outside the replaced span must be
+  unchanged**, compared exactly against the original text. That third condition
+  is the one that protects the comments — a count of states cannot detect a
+  splice that landed in `Devices[].States` instead, because the counts match
+  whenever the two maps are the same size, which is the common case. If any
+  part fails, abort and write nothing; `/govee save` reports the failure and the
+  pending edits stay intact. A splicer that silently corrupts a config is worse
+  than one that refuses.
+- **A `States` key it cannot splice is refused, not worked around.** If a
+  depth-1 `States` exists but its value is not an object — `null`, an array, a
+  string — that is distinct from the key being absent. Treating the two alike
+  appends a second `States` member and leaves the file with duplicate keys.
 - **Atomic replace.** Write a temp file in the same directory, then
   `File.Replace`, so a crash or a full disk cannot truncate `config.json`.
 - **The file's own indentation.** Render at the 2-space convention `Prettify`
