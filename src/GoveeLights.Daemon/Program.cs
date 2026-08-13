@@ -25,8 +25,17 @@ namespace GoveeLights
         static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         static readonly DateTime _startedAt = DateTime.UtcNow;
         static readonly ManualResetEventSlim _quit = new ManualResetEventSlim(false);
+        static DateTime _suppressWatchUntil = DateTime.MinValue;
 
         static DaemonConfig Cfg() { lock (_cfgGate) return _cfg; }
+
+        /// <summary>Mute the config watcher briefly. A save writes the file the watcher is
+        /// watching; without this the daemon reloads its own write, and a reload while
+        /// pending edits are live would rebuild the config underneath them.</summary>
+        public static void SuppressWatch(int ms)
+        {
+            _suppressWatchUntil = DateTime.UtcNow.AddMilliseconds(ms);
+        }
 
         [STAThread]
         public static int Main(string[] args)
@@ -83,6 +92,8 @@ namespace GoveeLights
             // A roster reloaded later (retry after a cold-start race, or /refresh) is
             // useless unless the render roster is rebuilt from it.
             _govee.DevicesLoaded = () => _renderer.SyncDevices();
+
+            StyleRoutes.Init(Cfg, _styles, configPath, () => SuppressWatch(3000));
 
             // Bind before anything else observable: a second instance must lose here.
             _http = new MiniHttpServer(_cfg.Port, Handle);
@@ -165,6 +176,11 @@ namespace GoveeLights
                 case "/shutdown":
                     ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(150); _quit.Set(); });
                     return HttpResponse.Json("{\"ok\":true}");
+                case "/styles": return StyleRoutes.Get(req);
+                case "/styles/set": return StyleRoutes.Set(req);
+                case "/styles/reset": return StyleRoutes.Reset(req);
+                case "/styles/save": return StyleRoutes.Save(req);
+                case "/styles/revert": return StyleRoutes.Revert(req);
                 default:
                     return HttpResponse.Text(404, "no such endpoint");
             }
@@ -303,6 +319,8 @@ namespace GoveeLights
                 DateTime last = DateTime.MinValue;
                 _watcher.Changed += (s, e) =>
                 {
+                    if (DateTime.UtcNow < _suppressWatchUntil) return;
+
                     // Editors write in bursts; debounce so we reload once.
                     if ((DateTime.UtcNow - last).TotalMilliseconds < 500) return;
                     last = DateTime.UtcNow;
@@ -319,6 +337,10 @@ namespace GoveeLights
                     Log.Level = fresh.ParsedLogLevel();
                     _renderer.SyncDevices();
                     Log.Info("config_reloaded", path);
+
+                    if (_styles.Dirty)
+                        Log.Warn("config_reloaded_with_pending",
+                            "config changed on disk while unsaved style edits are live; keeping the edits");
                 };
             }
             catch (Exception ex) { Log.Exception("config_watch_failed", ex); }
