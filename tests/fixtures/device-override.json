@@ -1,0 +1,15 @@
+{
+  "Enabled": true,
+  "ApiGuid": "00000000-0000-0000-0000-000000000000",
+  "Port": 17321,
+  "States": {
+    "Thinking": { "Color": "#3366CC", "Effect": "breathe", "Hz": 0.6 }
+  },
+  "Devices": [
+    {
+      "Name": "CeilingStrip",
+      "States": { "Thinking": { "Effect": "solid" } }
+    },
+    { "Name": "DeskStrip" }
+  ]
+}

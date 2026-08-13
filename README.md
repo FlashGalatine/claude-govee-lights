@@ -103,6 +103,29 @@ Rapid tool bursts are coalesced: a `PostToolUse` schedules the return to `Thinki
 250 ms later, and any new `PreToolUse` cancels it. Twenty back-to-back `Read` calls
 therefore render as one continuous cyan, not twenty flashes.
 
+## Customising the lights
+
+Each activity state has its own colour and animation, set in the `States` block of
+`%LOCALAPPDATA%\ClaudeGovee\config.json`. The file is hot-reloaded — save it and the
+lights change immediately, no restart needed.
+
+```json
+"States": {
+  "ToolShell": { "Color": "#FF7A18", "Effect": "chase", "Hz": 0.8, "Direction": "pingpong" }
+}
+```
+
+Ten effects are available — `solid`, `breathe`, `pulse`, `blink`, `chase`, `comet`,
+`wipe`, `progress`, `sparkle` and `rainbow` — most of them further tunable with
+`Color2`, `Direction`, `Easing`, `Tail` and `Depth`, though which of those actually
+do something varies by effect (`rainbow` ignores most of them; `Tail` only affects
+`chase` and `comet`). Every field is optional and inherits when omitted, so you can
+change one value without restating the rest. Individual devices can override any
+state via a `States` block inside their `Devices` entry.
+
+See [docs/EFFECTS.md](docs/EFFECTS.md) for the full reference, and run
+`/govee test <state>` to preview a state on your lights.
+
 ## Configuration
 
 ```jsonc

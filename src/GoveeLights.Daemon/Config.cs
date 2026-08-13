@@ -13,14 +13,28 @@ namespace GoveeLights
         public int BrightnessCap { get; set; } = 100;
         public bool Animate { get; set; } = true;
         public bool ManageRazerSwitch { get; set; } = true;
+
+        /// <summary>Per-device style overrides, layered over the global States map.
+        /// Lets a desk strip chase while a ceiling strip only breathes.</summary>
+        public Dictionary<string, StateStyle> States { get; set; } =
+            new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>A partial style. null means "inherit from the layer below" - see
+    /// Palette.ResolveFor. Every field is nullable precisely so a config can override one
+    /// value without restating the rest.</summary>
     public class StateStyle
     {
-        public string Color { get; set; }
-        public string Effect { get; set; }          // solid | breathe | pulse | blink | chase | comet
-        public double Hz { get; set; } = 0.6;
-        public int Brightness { get; set; } = -1;   // -1 = leave brightness alone
+        public string  Color       { get; set; }
+        public string  Color2      { get; set; }  // null/absent = inherit; "none" = explicitly single-colour; #RRGGBB = blend from that colour
+        public string  Effect      { get; set; }  // solid|breathe|pulse|blink|chase|comet|wipe|progress|sparkle|rainbow
+        public double? Hz          { get; set; }
+        public int?    Brightness  { get; set; }  // null = inherit; -1 = leave brightness alone
+        public string  Direction   { get; set; }  // forward|reverse|pingpong
+        public string  Easing      { get; set; }  // linear|sine|cubic|expo
+        public double? Tail        { get; set; }  // trail length, 1.0 = the effect's natural length
+        public double? Depth       { get; set; }  // 0..1 intensity floor
+        public double? FullSeconds { get; set; }  // progress: seconds to a full bar
     }
 
     public class RenderConfig
@@ -66,7 +80,8 @@ namespace GoveeLights
 
         public RenderConfig Render { get; set; } = new RenderConfig();
         public List<DeviceConfig> Devices { get; set; } = new List<DeviceConfig>();
-        public Dictionary<string, StateStyle> States { get; set; } = new Dictionary<string, StateStyle>();
+        public Dictionary<string, StateStyle> States { get; set; } =
+            new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> ToolClassMap { get; set; } = new Dictionary<string, string>();
 
         public string RestColor { get; set; } = "#FFD9A0";
@@ -104,18 +119,154 @@ namespace GoveeLights
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var ser = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
-            File.WriteAllText(path, Prettify(ser.Serialize(this)));
+            File.WriteAllText(path, Prettify(StripNulls(ser.Serialize(this))));
+        }
+
+        /// <summary>Drop object members whose value is literally null.
+        ///
+        /// This is the file first-run writes and the README tells people to edit, and
+        /// StateStyle's nullable fields mean JavaScriptSerializer - which has no
+        /// "omit nulls" option - emits six dead lines per state. A null member and an
+        /// absent one deserialize identically, so removing them changes nothing but the
+        /// reading.
+        ///
+        /// String-aware: only a `"key":null` sequence found outside a string literal is
+        /// removed, so a value that legitimately contains (or equals) the text "null"
+        /// survives, as does a null element inside an array.</summary>
+        static string StripNulls(string json)
+        {
+            var sb = new System.Text.StringBuilder(json.Length);
+            bool inStr = false, esc = false;
+            int i = 0;
+
+            while (i < json.Length)
+            {
+                var c = json[i];
+
+                if (inStr)
+                {
+                    sb.Append(c);
+                    if (esc) esc = false;
+                    else if (c == '\\') esc = true;
+                    else if (c == '"') inStr = false;
+                    i++;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    // Possible member name. Walk to its closing quote.
+                    int j = i + 1;
+                    bool e2 = false;
+                    while (j < json.Length)
+                    {
+                        var k = json[j];
+                        if (e2) e2 = false;
+                        else if (k == '\\') e2 = true;
+                        else if (k == '"') break;
+                        j++;
+                    }
+
+                    // "key":null followed by a member separator or the object's end.
+                    // A string value would put '"' at j+2, so "null" as text never matches.
+                    if (j + 6 <= json.Length &&
+                        json[j + 1] == ':' &&
+                        string.CompareOrdinal(json, j + 2, "null", 0, 4) == 0 &&
+                        (j + 6 == json.Length || json[j + 6] == ',' || json[j + 6] == '}'))
+                    {
+                        if (j + 6 < json.Length && json[j + 6] == ',')
+                        {
+                            i = j + 7;                      // eat the trailing comma too
+                        }
+                        else
+                        {
+                            // Last member: the comma to drop is the one already emitted.
+                            if (sb.Length > 0 && sb[sb.Length - 1] == ',') sb.Length--;
+                            i = j + 6;                      // leave '}' for the normal path
+                        }
+                        continue;
+                    }
+
+                    sb.Append(c);
+                    inStr = true;
+                    esc = false;
+                    i++;
+                    continue;
+                }
+
+                sb.Append(c);
+                i++;
+            }
+
+            return sb.ToString();
         }
 
         void Normalize()
         {
             if (Render == null) Render = new RenderConfig();
             if (Devices == null) Devices = new List<DeviceConfig>();
-            if (States == null) States = new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
+
+            // The OrdinalIgnoreCase comparer set in the property initializers does NOT
+            // survive deserialization: JavaScriptSerializer builds its own
+            // Dictionary<string, StateStyle> with the default ordinal comparer and assigns
+            // it over the property, so a config that spells a state "thinking" would be
+            // looked up as "Thinking" and silently miss. Rebuilding here is the only point
+            // that sees the post-deserialization instance.
+            States = Recase(States);
+            foreach (var d in Devices)
+            {
+                // A null element in the Devices JSON array is legal JSON. Dereferencing it
+                // would throw out of Normalize, which Load's catch turns into a null
+                // return, which makes Program overwrite the user's whole config with
+                // defaults - a silent, total data loss from one stray comma.
+                if (d == null) continue;
+                d.States = Recase(d.States);
+            }
+
+            WarnUnknownStateKeys(States, null);
+            foreach (var d in Devices)
+                if (d != null) WarnUnknownStateKeys(d.States, d.Name);
+
             if (ToolClassMap == null) ToolClassMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (QuietHours == null) QuietHours = new QuietHours();
             if (Render.TickMs < 10) Render.TickMs = 10;
             if (Port <= 0 || Port > 65535) Port = 17321;
+        }
+
+        /// <summary>Copy into a case-insensitive dictionary key by key. Deliberately NOT
+        /// the Dictionary(IDictionary, IEqualityComparer) copy constructor: a file holding
+        /// both "Thinking" and "thinking" would make that throw, and an exception here
+        /// costs the user their entire config (see the null-device note above). Copying
+        /// by hand lets the last spelling win instead.</summary>
+        static Dictionary<string, StateStyle> Recase(Dictionary<string, StateStyle> src)
+        {
+            var o = new Dictionary<string, StateStyle>(StringComparer.OrdinalIgnoreCase);
+            if (src != null) foreach (var kv in src) o[kv.Key] = kv.Value;
+            return o;
+        }
+
+        // A States key that is not an Activity name is silently inert - the same failure
+        // signature as the casing bug above, and exactly what copying an _examples_states
+        // key verbatim produces. Warn rather than discard, and warn once per distinct key:
+        // Load runs again on every hot reload. Mirrors Palette.Norm's style_unknown_value.
+        static readonly HashSet<string> _warnedStateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        static void WarnUnknownStateKeys(Dictionary<string, StateStyle> map, string device)
+        {
+            if (map == null) return;
+            foreach (var kv in map)
+            {
+                Activity a;
+                if (Enum.TryParse(kv.Key, true, out a) && Enum.IsDefined(typeof(Activity), a)) continue;
+
+                var tag = (device ?? "*") + ":" + kv.Key;
+                lock (_warnedStateKeys)
+                {
+                    if (!_warnedStateKeys.Add(tag)) continue;
+                }
+                Log.Warn("config_unknown_state", "States key is not an activity name; it will never be used",
+                    new Dictionary<string, object> { { "key", kv.Key }, { "device", device ?? "(global)" } });
+            }
         }
 
         public LogLevel ParsedLogLevel()

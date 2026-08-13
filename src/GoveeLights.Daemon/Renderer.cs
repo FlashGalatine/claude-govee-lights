@@ -47,6 +47,19 @@ namespace GoveeLights
         Activity _previous = Activity.Offline;
         DateTime _transitionStart = DateTime.MinValue;
 
+        /// <summary>When the state we are fading OUT of started. The outgoing frame has to
+        /// be rendered with its own time-in-state, not the incoming state's: progress reads
+        /// tInState, so reusing the fresh _transitionStart collapsed a filled bar to empty
+        /// for the whole TransitionMs window - the jump cut the cross-fade exists to remove,
+        /// just moved onto the outgoing frame.
+        ///
+        /// DateTime.MinValue on the very first transition is correct, not a hole: the
+        /// elapsed value is then enormous, and progress clamps frac to 1 (Effects.Shape),
+        /// so it renders a full bar. "A state whose start we never recorded has been
+        /// running forever" is the right reading, and progress is the only shape that looks
+        /// at tInState at all.</summary>
+        DateTime _prevTransitionStart = DateTime.MinValue;
+
         // Test override, set by POST /test.
         Activity? _forced;
         DateTime _forcedUntil = DateTime.MinValue;
@@ -96,7 +109,11 @@ namespace GoveeLights
                 {
                     foreach (var c in cfg.Devices)
                     {
-                        if (!c.Enabled) continue;
+                        // A null element survives Normalize now that it no longer throws
+                        // there, and SyncDevices runs from the DevicesLoaded callback -
+                        // outside the render tick's catch - so an unguarded deref here
+                        // would surface as an unhandled exception out of the SDK.
+                        if (c == null || !c.Enabled) continue;
                         var found = discovered.FirstOrDefault(x =>
                             string.Equals(x.Name, c.Name, StringComparison.OrdinalIgnoreCase));
 
@@ -170,6 +187,7 @@ namespace GoveeLights
             {
                 _previous = _current;
                 _current = resolved;
+                _prevTransitionStart = _transitionStart;    // before it is overwritten
                 _transitionStart = DateTime.UtcNow;
                 LastActivityAt = DateTime.UtcNow;
                 Log.Info("render_state", _current.ToString());
@@ -179,19 +197,14 @@ namespace GoveeLights
 
             if (_current == Activity.Offline) return;
 
-            var style = Palette.For(cfg.States, _current);
-            var color = Rgb.Parse(style.Color, new Rgb(120, 120, 120));
-
             // Cross-fade so state changes read as smooth rather than as a jump cut.
             var sinceTransition = (DateTime.UtcNow - _transitionStart).TotalMilliseconds;
-            if (cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs)
-            {
-                var prevStyle = Palette.For(cfg.States, _previous);
-                var prevColor = Rgb.Parse(prevStyle.Color, color);
-                color = Rgb.Lerp(prevColor, color, sinceTransition / cfg.Render.TransitionMs);
-            }
-
             var t = _clock.Elapsed.TotalSeconds;
+            var tInState = (DateTime.UtcNow - _transitionStart).TotalSeconds;
+            var tInPrevState = (DateTime.UtcNow - _prevTransitionStart).TotalSeconds;
+
+            var fading = cfg.Render.TransitionMs > 0 && sinceTransition < cfg.Render.TransitionMs;
+            var mix = fading ? sinceTransition / cfg.Render.TransitionMs : 1.0;
 
             List<DeviceRuntime> snapshot;
             lock (_devGate) snapshot = _devices.ToList();
@@ -199,12 +212,30 @@ namespace GoveeLights
             foreach (var d in snapshot)
             {
                 var segs = d.Cfg.Animate ? d.Segments : 1;
-                var frame = Effects.Render(style, t, segs, color);
+
+                // Resolved per device, not once for the tick: a spatial effect (chase,
+                // comet, ...) falls back to breathe when a device has no strip to be
+                // spatial on, and that fallback depends on this device's own segment
+                // count (Palette.ResolveFor).
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
+                var frame = Effects.Render(style, t, tInState, segs);
+
+                if (fading)
+                {
+                    // Render the outgoing state too and blend, so motion cross-fades
+                    // rather than snapping. Only inside the TransitionMs window.
+                    // tInPrevState, not tInState: the outgoing state's clock did not
+                    // restart just because we left it.
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
+                    var prevFrame = Effects.Render(prev, t, tInPrevState, segs);
+                    frame = Effects.Blend(prevFrame, frame, mix);
+                }
+
                 Emit(cfg, d, style, frame);
             }
         }
 
-        void Emit(DaemonConfig cfg, DeviceRuntime d, StateStyle style, Frame frame)
+        void Emit(DaemonConfig cfg, DeviceRuntime d, ResolvedStyle style, Frame frame)
         {
             var now = DateTime.UtcNow;
             if ((now - d.LastSendAt).TotalMilliseconds < cfg.Render.MinDeviceIntervalMs) return;

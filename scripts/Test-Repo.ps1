@@ -228,6 +228,443 @@ if (Test-Path $programCs) {
     }
 } else { No 'Program.cs exists' $programCs }
 
+# ------------------------------------------------------- effects engine
+Section 'Effects engine'
+# Effects is pure and deterministic, so CI can assert on real render output with no
+# hardware. The goldens are the regression net for the pipeline refactor: any change
+# to the six original effects' output is a bug unless it is deliberate.
+$exe = @(
+    (Join-Path $root 'dist/daemon/GoveeLightsDaemon.exe'),
+    (Join-Path $root 'src/GoveeLights.Daemon/bin/Release/net48/GoveeLightsDaemon.exe'),
+    (Join-Path $root 'src/GoveeLights.Daemon/bin/Debug/net48/GoveeLightsDaemon.exe')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+function Quote-DumpArg([string] $a) {
+    # Start-Process's array-form -ArgumentList does not escape embedded double quotes
+    # (Windows PowerShell 5.1 joins the array with spaces and lets CreateProcess's
+    # argv parser see the raw '"' characters), which corrupts the JSON --style payload
+    # before the daemon ever reads it. Build the command line by hand instead.
+    if ($a -match '[\s"]') { return '"' + ($a -replace '"', '\"') + '"' }
+    return $a
+}
+
+function Invoke-Dump {
+    param([string[]] $DumpArgs)
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        # Start-Process, not '&': the daemon is a WinExe, so stdout must be explicitly
+        # redirected for the parent to see anything.
+        $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
+        Start-Process -FilePath $exe -ArgumentList $cmdLine `
+            -NoNewWindow -Wait -RedirectStandardOutput $tmp | Out-Null
+        return @(Get-Content $tmp)
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+
+if (-not $exe) {
+    Write-Host '  SKIP  no build output found (run scripts\Build.ps1)' -ForegroundColor DarkGray
+} else {
+    $effects = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+    $golden  = @('solid','breathe','pulse','blink','chase','comet')
+
+    # Renders at all three segment shapes: 1 (whole-device), 3 (short strip), 10 (typical).
+    foreach ($e in $effects) {
+        $bad = $false
+        foreach ($n in 1, 3, 10) {
+            $lines = Invoke-Dump @('--style', "{`"Color`":`"#3366CC`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                                   '--segments', "$n", '--seconds', '0.4')
+            $rows = @($lines | Where-Object { $_ -notmatch '^#' -and $_ })
+            if ($rows.Count -lt 1) { $bad = $true; break }
+            foreach ($r in $rows) {
+                $cells = $r.Split(',')[1..($r.Split(',').Count - 1)]
+                # chase and comet paint per segment; the rest return a length-1 weight array,
+                # which makes Effects.ToFrame emit a whole-device colour and skip the segment
+                # array because DeviceColorControl is cheaper for uniform colour. Spatial effects fall back to
+                # breathe at one segment, so they collapse to a single cell there too.
+                # This is "paints per segment", which is deliberately not the same list as
+                # Palette.IsSpatial: sparkle paints per segment but is not spatial, because at
+                # one segment it reads fine as a random blink and needs no breathe fallback.
+                $spatial = @('chase','comet','wipe','progress','sparkle','rainbow')
+                $wantCells = if (($spatial -contains $e) -and $n -gt 1) { $n } else { 1 }
+                if ($cells.Count -ne $wantCells) { $bad = $true; break }
+                foreach ($c in $cells) { if ($c -notmatch '^#[0-9A-F]{6}$') { $bad = $true; break } }
+            }
+        }
+        if ($bad) { No "$e renders at 1, 3 and 10 segments" } else { Ok "$e renders at 1, 3 and 10 segments" }
+    }
+
+    # Determinism. Without it the goldens below are meaningless and sparkle (Task 4)
+    # would strobe differently on every frame.
+    $a = Invoke-Dump @('--style','{"Color":"#3366CC","Effect":"chase","Hz":0.6}','--segments','10','--seconds','1')
+    $b = Invoke-Dump @('--style','{"Color":"#3366CC","Effect":"chase","Hz":0.6}','--segments','10','--seconds','1')
+    if (($a -join "`n") -eq ($b -join "`n")) { Ok 'identical inputs produce identical frames' }
+    else { No 'render output is not deterministic' 'Goldens and sparkle both depend on this.' }
+
+    # Goldens. Only the six original effects have golden files.
+    foreach ($e in $golden) {
+        $goldenPath = Join-Path $root "tests/golden/$e.csv"
+        if (-not (Test-Path $goldenPath)) { No "golden exists for $e" $goldenPath; continue }
+        $got = Invoke-Dump @('--style', "{`"Color`":`"#3366CC`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                             '--segments','10','--seconds','4','--fps','25')
+        $want = @(Get-Content $goldenPath)
+        if (($got -join "`n") -eq ($want -join "`n")) { Ok "$e matches its golden frames" }
+        else { No "$e output changed" "Compare against tests/golden/$e.csv" }
+    }
+
+    # The bug this whole refactor exists to fix: an entry that sets only Hz used to be
+    # discarded wholesale because it carried no Color - the deleted Palette.For guard
+    # keyed on Color being present. Neither style below sets Color, so both fall back to
+    # the same grey; any frame difference can only come from Hz being honoured. The
+    # header line is stripped from both sides first, since it echoes "hz=2" vs "hz=0.6"
+    # regardless of whether Effects.Render ever reads style.Hz.
+    $partial = @(Invoke-Dump @('--style','{"Effect":"breathe","Hz":2.0}','--segments','1','--seconds','1')) -notmatch '^#'
+    $full    = @(Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6}','--segments','1','--seconds','1')) -notmatch '^#'
+    if (($partial -join "`n") -ne ($full -join "`n")) { Ok 'Hz is honoured independently of other fields' }
+    else { No 'Hz had no effect' 'Partial overrides are being discarded.' }
+
+    # Depth is an inherited effect default, not a per-state one: breathe's resolved style
+    # must carry Depth=0.35 even though no state specifies it. This checks the resolved
+    # header field rather than rendered brightness, since Effects.Render does not read
+    # style.Depth yet (Task 3 wires that up) - the 0.35 breathe floor in the maths today
+    # is still a literal, so measuring rendered output here would pass even if
+    # EffectDefaults's breathe entry were deleted.
+    $b = Invoke-Dump @('--style','{"Effect":"breathe","Hz":0.6,"Color":"#FFFFFF"}','--segments','1','--seconds','2')
+    if (($b | Where-Object { $_ -match '^#' }) -match 'depth=0\.35') { Ok 'breathe inherits its 0.35 depth floor' }
+    else { No 'breathe did not inherit its depth floor' (($b | Where-Object { $_ -match '^#' })) }
+
+    # ---- the single-zone spatial fallback ------------------------------------------
+    # The one regression this branch has already produced - a spatial effect hard-cutting
+    # a one-zone device to black - had no test. The n=1 arm of the render sweep above
+    # asserts only cell count and hex validity, and an all-#000000 frame satisfies both.
+    # The depth-floor check immediately above passes an explicit {"Effect":"breathe"}, so
+    # it exercises EffectDefaults, not the fallback. And every golden is --segments 10.
+    #
+    # Both halves are asserted deliberately:
+    #   * header effect=breathe - fails if the fallback is removed outright.
+    #   * min channel >= 80     - fails if the fallback renames the effect but loses the
+    #                             depth layer (e.g. stamping r.Effect="breathe" onto the
+    #                             already-resolved style instead of re-resolving through
+    #                             EffectDefaults). That variant still prints
+    #                             "effect=breathe" while rendering down to #000000, which
+    #                             is precisely the bug that shipped, so the header alone
+    #                             cannot catch it.
+    #   * max channel >= 250    - fails if the fallback pins output flat at the floor
+    #                             rather than breathing between floor and full.
+    # Colour is pure white so the rendered channel value IS weight * 255: 0.35 * 255 = 89.
+    function Get-MinMaxChannel($lines) {
+        $v = @($lines | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+            [Convert]::ToInt32($_.Split(',')[1].Substring(1, 2), 16) })
+        if ($v.Count -eq 0) { return @(-1, -1) }
+        return @(($v | Measure-Object -Minimum).Minimum, ($v | Measure-Object -Maximum).Maximum)
+    }
+
+    foreach ($e in 'chase', 'comet', 'wipe', 'progress', 'rainbow') {
+        $sz = Invoke-Dump @('--style', "{`"Color`":`"#FFFFFF`",`"Effect`":`"$e`",`"Hz`":0.6}",
+                            '--segments', '1', '--seconds', '2')
+        $szHeader = @($sz | Where-Object { $_ -match '^#' })
+        $szRange = Get-MinMaxChannel $sz
+        if (($szHeader -match 'effect=breathe') -and ($szHeader -match 'depth=0\.35') -and
+            $szRange[0] -ge 80 -and $szRange[1] -ge 250) {
+            Ok "$e falls back to breathe with its depth floor at one segment" "min $($szRange[0]), max $($szRange[1])"
+        } else {
+            No "$e single-zone fallback is wrong" "header=$szHeader min=$($szRange[0]) (want >= 80) max=$($szRange[1]) (want >= 250)"
+        }
+    }
+
+    # ...and the fallback must NOT fire once there is a strip to paint on. Without this,
+    # a resolve that unconditionally forced breathe would pass every check above.
+    $szWide = @(Invoke-Dump @('--style','{"Color":"#FFFFFF","Effect":"chase","Hz":0.6}','--segments','10','--seconds','0.2') |
+                Where-Object { $_ -match '^#' })
+    if ($szWide -match 'effect=chase') { Ok 'a spatial effect is left alone at 10 segments' }
+    else { No 'the single-zone fallback fired at 10 segments' $szWide }
+
+    # The two checks above go through Palette.ResolveStyleFor (the --style path). The
+    # renderer uses Palette.ResolveFor, so drive that path too - a fallback wired into one
+    # entry point but not the other is exactly the shape of the defect this replaces.
+    # --device also proves the device layer does not defeat it.
+    $szFixture = Join-Path $root 'tests/fixtures/single-zone-spatial.json'
+    function Test-ConfiguredFallback([string] $State, [string[]] $Extra) {
+        $lines = Invoke-Dump (@('--config', $szFixture, '--state', $State, '--segments', '1', '--seconds', '2') + $Extra)
+        $header = @($lines | Where-Object { $_ -match '^#' })
+        $range = Get-MinMaxChannel $lines
+        if (($header -match 'effect=breathe') -and ($header -match 'depth=0\.35') -and
+            $range[0] -ge 80 -and $range[1] -ge 250) {
+            Ok "a configured spatial state falls back to breathe at one segment ($State)" "min $($range[0]), max $($range[1])"
+        } else {
+            No "configured single-zone fallback is wrong ($State)" "header=$header min=$($range[0]) max=$($range[1])"
+        }
+    }
+    Test-ConfiguredFallback -State 'ToolRead'  -Extra @()
+    Test-ConfiguredFallback -State 'ToolAgent' -Extra @('--device', 'OneZone')
+
+    # Direction is an array transform, so reverse must be an exact mirror of forward. A
+    # field-count guard and a genuine-difference check keep this from passing vacuously
+    # if frames ever collapsed to a single colour column (the Finding-1 bug class: that
+    # collapse would make forward and reverse trivially identical single-cell rows).
+    $fwd = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"forward"}','--segments','10','--seconds','1')
+    $rev = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.6,"Color":"#3366CC","Direction":"reverse"}','--segments','10','--seconds','1')
+    $mirrorOk = $true
+    $sawFullWidth = $true
+    $sawDifference = $false
+    $fwdRows = @($fwd | Where-Object { $_ -notmatch '^#' -and $_ })
+    $revRows = @($rev | Where-Object { $_ -notmatch '^#' -and $_ })
+    if ($fwdRows.Count -ne $revRows.Count -or $fwdRows.Count -eq 0) { $mirrorOk = $false }
+    else {
+        for ($i = 0; $i -lt $fwdRows.Count; $i++) {
+            $f = $fwdRows[$i].Split(','); $r = $revRows[$i].Split(',')
+            if ($f.Count -le 2 -or $r.Count -le 2) { $sawFullWidth = $false; break }
+            $fc = $f[1..($f.Count-1)]; $rc = $r[1..($r.Count-1)]
+            if (($fc -join ',') -ne ($rc -join ',')) { $sawDifference = $true }
+            [array]::Reverse($rc)
+            if (($fc -join '') -ne ($rc -join '')) { $mirrorOk = $false; break }
+        }
+    }
+    if (-not $sawFullWidth) { No 'reverse test rows collapsed to fewer than 10 cells' }
+    elseif (-not $sawDifference) { No 'forward and reverse never differed' 'A collapsed frame would pass vacuously.' }
+    elseif ($mirrorOk) { Ok 'Direction reverse is the exact mirror of forward' }
+    else { No 'reverse is not a mirror of forward' }
+
+    # Depth must floor the output at depth * colour, and must not also cap the ceiling -
+    # asserting only the minimum would pass for a shape stuck flat at 0.5.
+    $d = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Depth":0.5}','--segments','1','--seconds','2')
+    $dv = @($d | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        [Convert]::ToInt32($_.Split(',')[1].Substring(1,2), 16) })
+    $dmin = ($dv | Measure-Object -Minimum).Minimum
+    $dmax = ($dv | Measure-Object -Maximum).Maximum
+    if ($dmin -ge 126 -and $dmin -le 129 -and $dmax -ge 253) {
+        Ok 'Depth floors the output' "min channel $dmin, max channel $dmax"
+    } else { No 'Depth floor not applied' "min channel $dmin (want ~128), max channel $dmax (want ~255)" }
+
+    # Color2 replaces "scale toward black" with a blend between two colours, so the
+    # dimmest frame should be Color2 rather than near-black, and the brightest should
+    # still be Color - asserting only the low end would pass for a Mix that always
+    # returned Color2. Depth is pinned to 0: blink defaults to Depth 0.06, which would
+    # lift the low end off Color2 exactly.
+    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000","Depth":0}','--segments','1','--seconds','2')
+    $c2rows = @($c2 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object { $_.Split(',')[1] })
+    $c2u = $c2rows | Sort-Object -Unique
+    if (($c2u -contains '#FF0000') -and ($c2u -contains '#FFFFFF')) { Ok 'Color2 is used as the low end of the blend' }
+    else { No 'Color2 was not blended' ($c2u -join ' ') }
+
+    # Pingpong must fold time into a genuine bounce, not mirror a circularly wrapping
+    # head (Finding 2). A raw "brightest segment index" comparison cannot tell a real
+    # bounce from CircularDistance's ordinary once-per-lap ring seam: chase already
+    # aliases index (n-1) to index 0 there once a head every lap - forward chase does
+    # this too, harmlessly - so an index-jump threshold flags that normal seam crossing
+    # exactly as loudly as the bug and cannot tell them apart (confirmed by hand: both
+    # the pre-fix and the fixed build show the same raw index jump at the seam).
+    #
+    # What actually distinguishes a bounce is symmetry: folding time makes tShape retrace
+    # itself around the turnaround, so the rendered frames on either side of it must be an
+    # exact mirror image of each other - not just "no big jump". Hz is chosen so 1/Hz is a
+    # whole number of frames (2 seconds at 25 fps = frame 50), landing the turnaround
+    # exactly on a sample instead of between two of them.
+    $pp = Invoke-Dump @('--style','{"Effect":"chase","Hz":0.5,"Color":"#3366CC","Direction":"pingpong"}','--segments','10','--seconds','4','--fps','25')
+    $ppRows = @($pp | Where-Object { $_ -notmatch '^#' -and $_ })
+    $mid = 50
+    $ppOk = $ppRows.Count -ge ($mid * 2)
+    if ($ppOk) {
+        for ($k = 1; $k -lt $mid; $k++) {
+            $before = ($ppRows[$mid - $k] -split ',', 2)[1]
+            $after  = ($ppRows[$mid + $k] -split ',', 2)[1]
+            if ($before -ne $after) { $ppOk = $false; break }
+        }
+    }
+    if ($ppOk) { Ok 'Pingpong is a true mirror image around its turnaround' }
+    else { No 'Pingpong does not bounce cleanly at the turnaround' }
+
+    # Easing with no golden coverage: sine and expo must each actually change pulse's
+    # output relative to linear for the same effect and Hz.
+    $easeLinear = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"linear"}','--segments','1','--seconds','1')) -notmatch '^#'
+    $easeSine   = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"sine"}','--segments','1','--seconds','1'))   -notmatch '^#'
+    $easeExpo   = (Invoke-Dump @('--style','{"Effect":"pulse","Hz":0.6,"Color":"#FFFFFF","Easing":"expo"}','--segments','1','--seconds','1'))   -notmatch '^#'
+    if ((($easeSine -join "`n") -ne ($easeLinear -join "`n")) -and (($easeExpo -join "`n") -ne ($easeLinear -join "`n"))) {
+        Ok 'sine and expo easing change pulse output'
+    } else { No 'easing had no effect on rendered output' }
+
+    # Tail with no golden coverage: a wider Tail must widen comet's falloff, lighting
+    # more segments above a brightness threshold in the same (deterministic, t=0) frame.
+    $tailNarrow = Invoke-Dump @('--style','{"Effect":"comet","Hz":0.6,"Color":"#FFFFFF","Tail":1.0}','--segments','20','--seconds','0.1')
+    $tailWide   = Invoke-Dump @('--style','{"Effect":"comet","Hz":0.6,"Color":"#FFFFFF","Tail":2.5}','--segments','20','--seconds','0.1')
+    $narrowRow = @($tailNarrow | Where-Object { $_ -notmatch '^#' -and $_ } | Select-Object -First 1)[0]
+    $wideRow   = @($tailWide   | Where-Object { $_ -notmatch '^#' -and $_ } | Select-Object -First 1)[0]
+    $narrowAbove = @($narrowRow.Split(',')[1..20] | ForEach-Object { [Convert]::ToInt32($_.Substring(1,2), 16) } | Where-Object { $_ -ge 150 }).Count
+    $wideAbove   = @($wideRow.Split(',')[1..20]   | ForEach-Object { [Convert]::ToInt32($_.Substring(1,2), 16) } | Where-Object { $_ -ge 150 }).Count
+    if ($wideAbove -gt $narrowAbove) {
+        Ok 'Tail widens the comet falloff' "tail=1.0 -> $narrowAbove segments, tail=2.5 -> $wideAbove segments"
+    } else { No 'Tail had no effect on comet falloff' "tail=1.0 -> $narrowAbove, tail=2.5 -> $wideAbove" }
+
+    # progress is driven by time-in-state, so it must be monotonically non-decreasing.
+    $p = Invoke-Dump @('--style','{"Effect":"progress","Color":"#FFFFFF","FullSeconds":2}','--segments','10','--seconds','3')
+    $lit = @($p | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $mono = $true
+    for ($i = 1; $i -lt $lit.Count; $i++) { if ($lit[$i] -lt $lit[$i-1]) { $mono = $false; break } }
+    # first=0 is a rise guard: without it, a shape stuck at all-lit from the very first
+    # frame is trivially monotonic and trivially ends at 10, so "fills" would never
+    # actually be observed to happen.
+    if ($mono -and $lit[0] -eq 0 -and $lit[-1] -eq 10) { Ok 'progress fills monotonically and reaches full' }
+    else { No 'progress does not fill monotonically to full' "first=$($lit[0]) last=$($lit[-1])" }
+
+    # rainbow must actually span hues rather than painting one colour.
+    $rb = Invoke-Dump @('--style','{"Effect":"rainbow","Hz":0.2,"Color":"#FFFFFF"}','--segments','10','--seconds','0.2')
+    $first = @($rb | Where-Object { $_ -notmatch '^#' -and $_ })[0].Split(',')[1..10]
+    if (@($first | Sort-Object -Unique).Count -ge 8) { Ok 'rainbow spans distinct hues across segments' }
+    else { No 'rainbow is not spanning hues' (@($first | Sort-Object -Unique).Count) }
+
+    # ...and its hues must actually advance over time, not just across segments: the
+    # previous check inspects row 0 only, so deleting the "t * s.Hz" phase term from
+    # Effects.Render's rainbow branch would still pass it.
+    $rbTime = Invoke-Dump @('--style','{"Effect":"rainbow","Hz":0.5,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    $rbRows = @($rbTime | Where-Object { $_ -notmatch '^#' -and $_ })
+    $rbFirstRow = ($rbRows[0].Split(',')[1..10]) -join ','
+    $rbLastRow  = ($rbRows[-1].Split(',')[1..10]) -join ','
+    if ($rbFirstRow -ne $rbLastRow) { Ok 'rainbow hues advance over time' }
+    else { No 'rainbow hues do not change over time' 'Deleting the t * s.Hz phase term would still pass the hue-span check.' }
+
+    # wipe has no golden coverage, so give it a direct behavioural check: over one full
+    # Hz cycle the lit count must rise from empty to fully lit and fall back to empty,
+    # with no discontinuity where the fill phase hands off to the clear phase. Hz and
+    # fps are chosen so the midpoint (cycle=0.5) lands exactly on a sampled frame.
+    $wp = Invoke-Dump @('--style','{"Effect":"wipe","Hz":0.5,"Color":"#FFFFFF"}','--segments','10','--seconds','2','--fps','20')
+    $wpLit = @($wp | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $half = [int]($wpLit.Count / 2)
+    $risesOk = $true
+    for ($i = 1; $i -le $half; $i++) { if ($wpLit[$i] -lt $wpLit[$i-1]) { $risesOk = $false; break } }
+    $fallsOk = $true
+    for ($i = $half + 1; $i -lt $wpLit.Count; $i++) { if ($wpLit[$i] -gt $wpLit[$i-1]) { $fallsOk = $false; break } }
+    $peak = ($wpLit | Measure-Object -Maximum).Maximum
+    $noJump = $true
+    for ($i = 1; $i -lt $wpLit.Count; $i++) { if ([Math]::Abs($wpLit[$i] - $wpLit[$i-1]) -gt 2) { $noJump = $false; break } }
+    if ($risesOk -and $fallsOk -and $peak -eq 10 -and $noJump) {
+        Ok 'wipe rises to full and falls back with no discontinuity at the midpoint'
+    } else {
+        No 'wipe fill/clear shape is wrong' "rises=$risesOk falls=$fallsOk peak=$peak(want 10) noJump=$noJump"
+    }
+
+    # sparkle is hashed rather than random: same input, same frames. Already covered by
+    # the global determinism check, but assert it directly since it is the one effect
+    # where non-determinism would be easy to reintroduce.
+    $s1 = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    $s2 = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF"}','--segments','10','--seconds','1')
+    if (($s1 -join "`n") -eq ($s2 -join "`n")) { Ok 'sparkle is deterministic' }
+    else { No 'sparkle is not deterministic' 'Use the hash, not Random.' }
+
+    # ...and that it actually twinkles. Compare only the cell columns: every row carries a
+    # distinct timestamp in column 0, so uniquing whole rows would pass no matter what.
+    $spatterns = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        ($_.Split(',')[1..10]) -join '' })
+    if (@($spatterns | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
+    else { No 'sparkle output is static' (@($spatterns | Sort-Object -Unique).Count) }
+
+    # ...and it must light a proper subset near the 0.28 threshold, not "all" or "none":
+    # the variety check above would still pass a hash that only ever lit 1 of 10 segments,
+    # or one that alternated between all-lit and all-dark whole frames. Depth is forced to
+    # 0 here (sparkle defaults to 0.06) so an "off" cell renders as literal #000000 - with
+    # the default depth every cell is a non-zero shade and this whole check is vacuous.
+    $sd = Invoke-Dump @('--style','{"Effect":"sparkle","Hz":8,"Color":"#FFFFFF","Depth":0}','--segments','10','--seconds','1')
+    $sdRows = @($sd | Where-Object { $_ -notmatch '^#' -and $_ })
+    $sdLitPerRow = @($sdRows | ForEach-Object {
+        @($_.Split(',')[1..10] | Where-Object { $_ -ne '#000000' }).Count })
+    $sdTotalLit = ($sdLitPerRow | Measure-Object -Sum).Sum
+    $sdFraction = $sdTotalLit / ($sdRows.Count * 10)
+    $sdMixedRows = @($sdLitPerRow | Where-Object { $_ -gt 0 -and $_ -lt 10 }).Count
+    if ($sdFraction -gt 0.15 -and $sdFraction -lt 0.45 -and $sdMixedRows -gt ($sdRows.Count * 0.5)) {
+        Ok 'sparkle lights a plausible, proper subset of segments' "lit fraction=$([Math]::Round($sdFraction, 2))"
+    } else {
+        No 'sparkle lit fraction is not plausible' "lit fraction=$([Math]::Round($sdFraction, 2)), mixed rows=$sdMixedRows/$($sdRows.Count)"
+    }
+
+    # Per-device overrides layer on top of the global States map. CeilingStrip pins
+    # Thinking to solid while inheriting the colour; DeskStrip inherits everything.
+    $fixture = Join-Path $root 'tests/fixtures/device-override.json'
+    $ceiling = Invoke-Dump @('--config',$fixture,'--state','Thinking','--device','CeilingStrip','--segments','1','--seconds','1')
+    $desk    = Invoke-Dump @('--config',$fixture,'--state','Thinking','--device','DeskStrip','--segments','1','--seconds','1')
+
+    if (($ceiling | Where-Object { $_ -match '^#' }) -match 'effect=solid') { Ok 'device override changes the effect' }
+    else { No 'device override was ignored' ($ceiling | Where-Object { $_ -match '^#' }) }
+
+    if (($ceiling | Where-Object { $_ -match '^#' }) -match 'color=#3366CC') { Ok 'device override inherits unset fields' }
+    else { No 'device override did not inherit Color' ($ceiling | Where-Object { $_ -match '^#' }) }
+
+    # Assert the COLOUR, not the effect. The fixture's global States.Thinking sets
+    # breathe and so does the built-in Palette.Defaults()["Thinking"], so 'effect=breathe'
+    # here is satisfied by deleting the config layer entirely - it cannot fail for the
+    # reason it names. The colours differ (#3366CC config vs #7B4DFF built-in), so this
+    # form genuinely separates the two layers.
+    if (($desk | Where-Object { $_ -match '^#' }) -match 'color=#3366CC') { Ok 'a device with no override uses the global style' }
+    else { No 'unoverridden device did not use the global style' ($desk | Where-Object { $_ -match '^#' }) }
+
+    # A blend must start at the outgoing frame and end at the incoming one.
+    $plain = @(Invoke-Dump @('--state','Error','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $blend = @(Invoke-Dump @('--from','Done','--state','Error','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $pureFrom = @(Invoke-Dump @('--state','Done','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+
+    if ($blend.Count -eq $plain.Count -and $blend.Count -gt 1) { Ok 'blended dump has the expected frame count' }
+    else { No 'blended dump frame count is wrong' "$($blend.Count) vs $($plain.Count)" }
+
+    if ($blend[0] -eq $pureFrom[0]) { Ok 'blend at mix 0 equals the outgoing frame' }
+    else { No 'blend at mix 0 is not the outgoing frame' }
+
+    if ($blend[-1] -eq $plain[-1]) { Ok 'blend at mix 1 equals the incoming frame' }
+    else { No 'blend at mix 1 is not the incoming frame' }
+
+    # The middle must be neither endpoint, or nothing is actually being blended.
+    $mid = $blend[[int]($blend.Count / 2)]
+    if ($mid -ne $plain[[int]($blend.Count / 2)] -and $mid -ne $pureFrom[[int]($blend.Count / 2)]) {
+        Ok 'blend midpoint differs from both endpoints'
+    } else { No 'blend midpoint matches an endpoint' 'Frames are not being mixed.' }
+
+    # Error and Done are both non-spatial (blink and solid collapse to a single
+    # whole-device cell), so the checks above never exercise Blend's segment-array path -
+    # a Blend that forgot Segments entirely would still pass all four. ToolEdit (chase)
+    # and ToolAgent (comet) are both spatial at 10 segments, so this transition must carry
+    # a full 10-cell array through the midpoint.
+    $spBlend = @(Invoke-Dump @('--from','ToolEdit','--state','ToolAgent','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $spMidCells = $spBlend[[int]($spBlend.Count / 2)].Split(',')
+    if ($spMidCells.Count -eq 11) { Ok 'blend midpoint keeps the full segment array for two spatial states' }
+    else { No 'blend midpoint lost the segment array' "$($spMidCells.Count) columns (want 11)" }
+
+    # ...and the cells must actually differ across the row - a Blend that lerped only
+    # Solid and broadcast it to every cell would still produce 11 columns but with every
+    # cell identical, which the column-count check above cannot tell apart from a real
+    # per-cell blend.
+    $spMidUniqueCells = @($spMidCells[1..10] | Sort-Object -Unique).Count
+    if ($spMidUniqueCells -gt 1) { Ok 'blend midpoint cells vary across the segment array' }
+    else { No 'blend midpoint cells are uniform' 'Segments may have been broadcast from Solid instead of blended per-cell.' }
+
+    # ...and the midpoint must not simply BE the incoming frame. The two checks above are
+    # both satisfied by a Blend that returns b outright: ToolAgent's comet frame already
+    # has 11 columns and already varies cell to cell. Comparing against a pure --state
+    # ToolAgent dump at the same row index is what makes 'return b' go red.
+    $spPure = @(Invoke-Dump @('--state','ToolAgent','--segments','10','--seconds','1') | Where-Object { $_ -notmatch '^#' -and $_ })
+    $spMidIdx = [int]($spBlend.Count / 2)
+    if ($spBlend[$spMidIdx] -ne $spPure[$spMidIdx]) { Ok 'spatial blend midpoint is not simply the incoming frame' }
+    else { No 'spatial blend midpoint equals the pure incoming frame' 'Blend may be returning b outright for segment arrays.' }
+}
+
+# Shipping an example config that names an effect the engine does not implement
+# would render as solid, only warning once per distinct value in the daemon log
+# rather than failing loudly, so this check catches it before it ships.
+$known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+if ($parsed['config/config.example.json']) {
+    $badEffects = @()
+    # Both the live States block and the _examples_states showcase, since a broken
+    # example is exactly what a user would copy.
+    foreach ($blockName in 'States', '_examples_states') {
+        $block = $parsed['config/config.example.json'].$blockName
+        if (-not $block) { continue }
+        foreach ($p in $block.PSObject.Properties) {
+            if ($p.Name -eq '_comment') { continue }
+            $e = $p.Value.Effect
+            if ($e -and ($known -notcontains $e)) { $badEffects += "$blockName.$($p.Name)=$e" }
+        }
+    }
+    if ($badEffects.Count -eq 0) { Ok 'config.example.json names only known effects' }
+    else { No 'config.example.json names an unknown effect' ($badEffects -join ', ') }
+}
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
@@ -236,6 +673,7 @@ else { No '.gitignore excludes the API GUID' 'The GUID is a credential.' }
 
 if (Test-Path (Join-Path $root 'LICENSE')) { Ok 'LICENSE present' } else { No 'LICENSE present' }
 if (Test-Path (Join-Path $root 'docs/API-NOTES.md')) { Ok 'docs/API-NOTES.md present' } else { No 'docs/API-NOTES.md present' }
+if (Test-Path (Join-Path $root 'docs/EFFECTS.md')) { Ok 'docs/EFFECTS.md present' } else { No 'docs/EFFECTS.md present' }
 
 Write-Host ''
 Write-Host ("=== $pass passed, $fail failed ===") -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })

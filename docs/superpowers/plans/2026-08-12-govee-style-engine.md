@@ -506,21 +506,21 @@ namespace GoveeLights
             r.HasColor2 = !string.IsNullOrEmpty(c2);
             r.Color2 = r.HasColor2 ? Rgb.Parse(c2, new Rgb(0, 0, 0)) : new Rgb(0, 0, 0);
 
-            r.Hz = PickD(all, x => x.Hz, 0.6);
+            r.Hz = PickN(all, x => x.Hz, 0.6);
             if (r.Hz <= 0) r.Hz = 0.6;               // Offline stores Hz 0; solid ignores it anyway
 
-            r.Brightness = PickI(all, x => x.Brightness, -1);
+            r.Brightness = PickN(all, x => x.Brightness, -1);
             r.Direction  = Norm(Pick(all, x => x.Direction), KnownDirections, "forward", "Direction");
             r.Easing     = Norm(Pick(all, x => x.Easing), KnownEasings, "linear", "Easing");
 
-            r.Tail = PickD(all, x => x.Tail, 1.0);
+            r.Tail = PickN(all, x => x.Tail, 1.0);
             if (r.Tail <= 0) r.Tail = 1.0;
 
-            r.Depth = PickD(all, x => x.Depth, 0.0);
+            r.Depth = PickN(all, x => x.Depth, 0.0);
             if (r.Depth < 0) r.Depth = 0;
             if (r.Depth > 1) r.Depth = 1;
 
-            r.FullSeconds = PickD(all, x => x.FullSeconds, 30.0);
+            r.FullSeconds = PickN(all, x => x.FullSeconds, 30.0);
             if (r.FullSeconds <= 0) r.FullSeconds = 30.0;
 
             return r;
@@ -537,18 +537,7 @@ namespace GoveeLights
             return null;
         }
 
-        static double PickD(StateStyle[] layers, Func<StateStyle, double?> f, double dflt)
-        {
-            for (int i = layers.Length - 1; i >= 0; i--)
-            {
-                if (layers[i] == null) continue;
-                var v = f(layers[i]);
-                if (v.HasValue) return v.Value;
-            }
-            return dflt;
-        }
-
-        static int PickI(StateStyle[] layers, Func<StateStyle, int?> f, int dflt)
+        static T PickN<T>(StateStyle[] layers, Func<StateStyle, T?> f, T dflt) where T : struct
         {
             for (int i = layers.Length - 1; i >= 0; i--)
             {
@@ -831,6 +820,7 @@ namespace GoveeLights
 
             var w = Shape(effect, t, tInState, n, s);
             w = ApplyDirection(w, s, t);
+            // AMENDED IN REVIEW: see the note at the end of this task.
             ApplyEasing(w, s.Easing);
             ApplyDepth(w, s.Depth);
             return ToFrame(w, s, n);
@@ -847,35 +837,36 @@ namespace GoveeLights
 
         // ---- shapes -----------------------------------------------------------------
 
+        /// <summary>Returns one weight per segment - or a single weight when the effect is
+        /// uniform across the device. That length-1 case is load-bearing: it is what makes
+        /// ToFrame emit a whole-device colour instead of a segment array, and what makes
+        /// direction a no-op for effects that have no direction.</summary>
         static double[] Shape(string effect, double t, double tInState, int n, ResolvedStyle s)
         {
-            var w = new double[n];
             switch (effect)
             {
                 case "breathe":
                 {
                     var k = (Math.Sin(t * 2 * Math.PI * s.Hz) + 1) / 2;
-                    for (int i = 0; i < n; i++) w[i] = k;
-                    return w;
+                    return new[] { k };
                 }
 
                 case "pulse":
                 {
                     // Raw sine; the cubic that makes it snap is the default easing.
                     var k = (Math.Sin(t * 2 * Math.PI * s.Hz) + 1) / 2;
-                    for (int i = 0; i < n; i++) w[i] = k;
-                    return w;
+                    return new[] { k };
                 }
 
                 case "blink":
                 {
                     var on = ((int)Math.Floor(t * s.Hz * 2)) % 2 == 0 ? 1.0 : 0.0;
-                    for (int i = 0; i < n; i++) w[i] = on;
-                    return w;
+                    return new[] { on };
                 }
 
                 case "chase":
                 {
+                    var w = new double[n];
                     var head = (t * s.Hz * n) % n;
                     for (int i = 0; i < n; i++)
                     {
@@ -889,6 +880,7 @@ namespace GoveeLights
 
                 case "comet":
                 {
+                    var w = new double[n];
                     var head = (t * s.Hz * n) % n;
                     for (int i = 0; i < n; i++)
                     {
@@ -901,10 +893,7 @@ namespace GoveeLights
                 }
 
                 default: // "solid"
-                {
-                    for (int i = 0; i < n; i++) w[i] = 1.0;
-                    return w;
-                }
+                    return new[] { 1.0 };
             }
         }
 
@@ -963,8 +952,10 @@ namespace GoveeLights
         static Frame ToFrame(double[] w, ResolvedStyle s, int n)
         {
             // Uniform colour is cheaper and more reliable through DeviceColorControl than
-            // through a segment array, so do not fill segments unnecessarily.
-            if (n <= 1) return new Frame { Solid = Mix(s, w[0]), Segments = null };
+            // through a segment array, so do not fill segments unnecessarily. A length-1
+            // weight array is exactly the old Whole() path: keep it byte-identical or the
+            // goldens - and the wire traffic - both change.
+            if (w.Length <= 1) return new Frame { Solid = Mix(s, w[0]), Segments = null };
 
             var cells = new Rgb[n];
             for (int i = 0; i < n; i++) cells[i] = Mix(s, w[i]);
@@ -1032,8 +1023,9 @@ Append inside the `else` branch of the `Effects engine` section in `scripts/Test
     else { No 'Depth floor not applied' "min channel $dmin, expected 128" }
 
     # Color2 replaces "scale toward black" with a blend between two colours, so the
-    # dimmest frame should be Color2 rather than near-black.
-    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000"}','--segments','1','--seconds','2')
+    # dimmest frame should be Color2 rather than near-black. Depth is pinned to 0: blink
+    # defaults to Depth 0.06, which would lift the low end off Color2 exactly.
+    $c2 = Invoke-Dump @('--style','{"Effect":"blink","Hz":2.0,"Color":"#FFFFFF","Color2":"#FF0000","Depth":0}','--segments','1','--seconds','2')
     $c2rows = @($c2 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object { $_.Split(',')[1] })
     if (($c2rows | Sort-Object -Unique) -contains '#FF0000') { Ok 'Color2 is used as the low end of the blend' }
     else { No 'Color2 was not blended' ($c2rows | Sort-Object -Unique) -join ' ' }
@@ -1053,6 +1045,22 @@ Expected: `=== N passed, 0 failed ===` with the three new checks passing.
 git add src/GoveeLights.Daemon/Effects.cs scripts/Test-Repo.ps1
 git commit -m "Replace the effects switch with a shape-plus-stages pipeline"
 ```
+
+**Amended during review.** Two defects in the design above were found by the task review
+and fixed in a follow-up commit; the code in this section is the pre-fix version and the
+repository is the authority:
+
+1. The `n <= 1 && IsSpatial(effect)` fallback rewrote the effect name to `breathe` while
+   keeping the *original* effect's resolved style, so chase and comet lost breathe's 0.35
+   depth floor and went fully black on one-zone devices. The fallback moved into
+   `Palette.ResolveFor(cfg, device, state, segments)`, which re-resolves with `Effect`
+   forced to `breathe` so breathe's own effect-defaults apply. `IsSpatial` moved to
+   `Palette` as the single source of truth, and `Effects.Render` no longer rewrites the
+   effect name.
+2. `pingpong` as an array mirror teleported the head across the strip at each turnaround,
+   because the circular `head` kept advancing underneath the mirror. It became a phase
+   fold (`FoldTime`) applied before the shape, gated to spatial effects with more than one
+   segment; `ApplyDirection` now handles `reverse` only.
 
 ---
 
@@ -1105,6 +1113,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                 case "wipe":
                 {
                     // One cycle fills the strip, the next clears it from the same end.
+                    var w = new double[n];
                     var cycle = (t * s.Hz) - Math.Floor(t * s.Hz);
                     var pos = cycle * 2 * n;
                     for (int i = 0; i < n; i++)
@@ -1119,6 +1128,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                 {
                     // Fills by elapsed time in the state, then holds full. The partial
                     // leading cell keeps it from stepping a whole segment at a time.
+                    var w = new double[n];
                     var frac = tInState / s.FullSeconds;
                     if (frac < 0) frac = 0;
                     if (frac > 1) frac = 1;
@@ -1136,6 +1146,7 @@ In `src/GoveeLights.Daemon/Effects.cs`, add these cases to the `Shape` switch, b
                     // Hashed, not random: Hz becomes a twinkle rate instead of a 25fps
                     // strobe, the segment CSV only changes when the step advances so the
                     // rate limiter is not fighting it, and the output stays reproducible.
+                    var w = new double[n];
                     var step = (long)Math.Floor(t * s.Hz);
                     for (int i = 0; i < n; i++) w[i] = Hash01(i, step) < 0.28 ? 1.0 : 0.0;
                     return w;
@@ -1163,10 +1174,19 @@ Add the hash helper alongside `CircularDistance`:
 
 - [ ] **Step 3: Wire rainbow into `Render` and the spatial list**
 
-Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path entirely. In `Effects.Render`, insert immediately after the `if (n <= 1 && IsSpatial(effect))` line:
+Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path entirely.
+
+First add `"rainbow"` to `Palette.IsSpatial` alongside `chase`, `comet`, `wipe` and
+`progress`. That is what makes a one-zone device fall back to `breathe` **with breathe's
+own `Depth 0.35`** — the fallback happens during resolution, in `Palette.ResolveFor`, so by
+the time `Effects.Render` sees the style the effect name is already `breathe` and the
+rainbow branch below is correctly skipped.
+
+Then, in `Effects.Render`, insert the hue branch immediately before the shape-and-stages
+call (it keys off the already-resolved `s.Effect`, and `Render` no longer rewrites it):
 
 ```csharp
-            if (effect == "rainbow")
+            if (s.Effect == "rainbow")
             {
                 var hues = new Rgb[n];
                 for (int i = 0; i < n; i++)
@@ -1177,7 +1197,7 @@ Rainbow varies hue, not intensity, so it bypasses the shape-and-stages path enti
             }
 ```
 
-Add `case "rainbow":` to `IsSpatial` alongside `chase`/`comet`/`wipe`/`progress`. Note that `sparkle` is deliberately **not** spatial: on a single zone it reads as a random blink, which is fine.
+Note that `sparkle` is deliberately **not** in `Palette.IsSpatial`: on a single zone it reads as a random blink, which needs no `breathe` fallback. It still paints per segment when there is more than one.
 
 - [ ] **Step 4: Build**
 
@@ -1203,6 +1223,17 @@ to
 ```
 
 and change the golden loop's `foreach ($e in $effects)` to `foreach ($e in $golden)` — only the six original effects have goldens.
+
+Also extend the per-segment list used by the render sweep's cell-count assertion, so the
+four new effects are checked for the right shape rather than waved through:
+
+```powershell
+    $spatial = @('chase','comet','wipe','progress','sparkle','rainbow')
+```
+
+Note this list is "paints per segment", which is deliberately **not** the same as
+`Palette.IsSpatial`: `sparkle` paints per segment but is not in `IsSpatial`, because at one
+segment it reads fine as a random blink and needs no `breathe` fallback.
 
 Then append these checks:
 
@@ -1230,10 +1261,12 @@ Then append these checks:
     if (($s1 -join "`n") -eq ($s2 -join "`n")) { Ok 'sparkle is deterministic' }
     else { No 'sparkle is not deterministic' 'Use the hash, not Random.' }
 
-    # ...and that it actually twinkles: some segments lit, some not, changing over time.
-    $srows = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ })
-    if (@($srows | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
-    else { No 'sparkle output is static' }
+    # ...and that it actually twinkles. Compare only the cell columns: every row carries a
+    # distinct timestamp in column 0, so uniquing whole rows would pass no matter what.
+    $spatterns = @($s1 | Where-Object { $_ -notmatch '^#' -and $_ } | ForEach-Object {
+        ($_.Split(',')[1..10]) -join '' })
+    if (@($spatterns | Sort-Object -Unique).Count -gt 3) { Ok 'sparkle varies over time' }
+    else { No 'sparkle output is static' (@($spatterns | Sort-Object -Unique).Count) }
 ```
 
 - [ ] **Step 6: Run the tests**
@@ -1260,12 +1293,12 @@ git commit -m "Add wipe, progress, sparkle and rainbow effects"
 - Test: `scripts/Test-Repo.ps1`
 
 **Interfaces:**
-- Consumes: `Palette.Resolve(cfg, device, state)` (Task 2), `DeviceConfig.States` (Task 2), `FrameDump`'s `--config` / `--device` flags (Task 2).
+- Consumes: `Palette.ResolveFor(cfg, device, state, segments)` (Task 3 fix round), `DeviceConfig.States` (Task 2), `FrameDump`'s `--config` / `--device` flags (Task 2).
 - Produces: no new API. Behaviour only.
 
 - [ ] **Step 1: Move resolution inside the device loop**
 
-Replace the block written in Task 2 Step 4 (`Renderer.cs`, from `var style = Palette.Resolve(...)` through the end of the `foreach`) with:
+Replace the current block in `Renderer.cs` — from the `Palette.ResolveFor(...)` call above the device loop through the end of the `foreach` — with:
 
 ```csharp
             var t = _clock.Elapsed.TotalSeconds;
@@ -1281,23 +1314,25 @@ Replace the block written in Task 2 Step 4 (`Renderer.cs`, from `var style = Pal
             {
                 // Styles are resolved per device, not once per tick: a device may override
                 // any field of any state, so two devices can be showing different effects.
-                var style = Palette.Resolve(cfg, d.Cfg, _current);
+                // ResolveFor takes the segment count because a spatial effect on a one-zone
+                // device resolves to breathe, and must pick up breathe's own depth floor.
+                var segs = d.Cfg.Animate ? d.Segments : 1;
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
 
                 if (fading)
                 {
-                    var prev = Palette.Resolve(cfg, d.Cfg, _previous);
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
                     style.Color = Rgb.Lerp(prev.Color, style.Color, mix);
                     if (style.HasColor2 && prev.HasColor2)
                         style.Color2 = Rgb.Lerp(prev.Color2, style.Color2, mix);
                 }
 
-                var segs = d.Cfg.Animate ? d.Segments : 1;
                 var frame = Effects.Render(style, t, tInState, segs);
                 Emit(cfg, d, style, frame);
             }
 ```
 
-`Palette.Resolve` returns a fresh `ResolvedStyle` each call, so mutating `style.Color` for the cross-fade cannot leak between devices.
+`Palette.ResolveFor` returns a fresh `ResolvedStyle` each call, so mutating `style.Color` for the cross-fade cannot leak between devices.
 
 - [ ] **Step 2: Build**
 
@@ -1422,15 +1457,15 @@ In `Renderer.cs`, replace the `foreach` body written in Task 5 Step 1 with:
 ```csharp
             foreach (var d in snapshot)
             {
-                var style = Palette.Resolve(cfg, d.Cfg, _current);
                 var segs = d.Cfg.Animate ? d.Segments : 1;
+                var style = Palette.ResolveFor(cfg, d.Cfg, _current, segs);
                 var frame = Effects.Render(style, t, tInState, segs);
 
                 if (fading)
                 {
                     // Render the outgoing state too and blend, so motion cross-fades
                     // rather than snapping. Only inside the TransitionMs window.
-                    var prev = Palette.Resolve(cfg, d.Cfg, _previous);
+                    var prev = Palette.ResolveFor(cfg, d.Cfg, _previous, segs);
                     var prevFrame = Effects.Render(prev, t, tInState, segs);
                     frame = Effects.Blend(prevFrame, frame, mix);
                 }
@@ -1456,7 +1491,7 @@ In `src/GoveeLights.Daemon/FrameDump.cs`, after the style is resolved and before
                     Console.Error.WriteLine("unknown --from: " + fromName);
                     return 2;
                 }
-                fromStyle = Palette.Resolve(null, null, fa);
+                fromStyle = Palette.ResolveFor(null, null, fa, segments);
             }
 ```
 
@@ -1564,7 +1599,7 @@ outside the effect, they work on all of them the same way.
 | Field | Type | Meaning |
 |---|---|---|
 | `Color` | `#RRGGBB` | The primary colour. |
-| `Color2` | `#RRGGBB` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. |
+| `Color2` | `#RRGGBB` \| `none` | Optional. When set, weights blend `Color2 → Color` instead of scaling `Color` toward black. Omit it to inherit; set it to `none` to override an inherited second colour back to single-colour. |
 | `Effect` | name | See the table below. |
 | `Hz` | number | Rate. Cycles per second for time-based effects; twinkle steps per second for `sparkle`. |
 | `Brightness` | 0–100 | Device brightness. `-1` leaves it alone. |
@@ -1757,15 +1792,22 @@ Expected: `=== N passed, 0 failed ===`.
 
 - [ ] **Step 7: Verify the new effects on hardware**
 
+The built-in state defaults are unchanged by this work, so `/govee test <state>` still
+shows the original styles. To see the new effects on hardware, temporarily paste one of
+the `_examples_states` entries into the live `States` block of
+`%LOCALAPPDATA%\ClaudeGovee\config.json` — it hot-reloads on save — then test it:
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Build.ps1 -Restart
+# Paste {"Color":"#FF7A18","Effect":"chase","Direction":"pingpong","Hz":0.8} as ToolShell, save, then:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test ToolShell
+# Paste {"Color":"#00C8A0","Effect":"progress","FullSeconds":8} as Compacting, save, then:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test Compacting
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 test Error
 ```
 
-Expected: `ToolShell` bounces rather than wrapping; `Compacting` fills as a bar;
-`Error` blinks between bright red and dark red rather than red and black.
+Expected: `ToolShell` bounces rather than wrapping, and `Compacting` fills as a bar.
+Revert the config edits afterwards. If you have no Govee hardware to hand, say so and
+skip this step — every other check in this task is automated.
 
 - [ ] **Step 8: Commit**
 

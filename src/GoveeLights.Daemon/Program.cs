@@ -30,6 +30,10 @@ namespace GoveeLights
         [STAThread]
         public static int Main(string[] args)
         {
+            // Headless render dump: no config dir, no logging, no port. Must come first.
+            if (args.Any(a => string.Equals(a, "--dump-frames", StringComparison.OrdinalIgnoreCase)))
+                return FrameDump.Run(args);
+
             var console = args.Any(a => a == "--console");
             if (console) { AllocConsole(); Log.AlsoConsole = true; }
 
