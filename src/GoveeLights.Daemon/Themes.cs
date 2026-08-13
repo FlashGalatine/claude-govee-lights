@@ -113,7 +113,10 @@ namespace GoveeLights
             return o;
         }
 
-        /// <summary>Brightness and rate scaling, clamped to the ranges the engine accepts.
+        /// <summary>Brightness and rate scaling. Brightness is clamped to 1..100; Hz is
+        /// NOT clamped - it is multiplied and left as it lands, which is safe only because
+        /// every factor used here is small and Palette.Defaults' rates are well under
+        /// StyleRoutes' 50 Hz ceiling. A larger factor added later would need a clamp.
         /// Colours are untouched: a muted theme should read as the same palette turned
         /// down, not as a different one.</summary>
         static Dictionary<string, StateStyle> Scale(Dictionary<string, StateStyle> src,

@@ -14,6 +14,7 @@ namespace GoveeLights
         static StyleStore _styles;
         static string _configPath;
         static Action _onSaved;
+        static Func<bool> _afterSaved;
         static Action<Activity, int> _force;
         static readonly JavaScriptSerializer _json = new JavaScriptSerializer();
 
@@ -31,11 +32,24 @@ namespace GoveeLights
         /// multi-call sequence Save is made of.</summary>
         static readonly object _saveGate = new object();
 
+        /// <summary>A save needs BOTH callbacks, which is why they are separate parameters
+        /// rather than one "the file changed" hook: they run on opposite sides of the write
+        /// and do opposite things.
+        ///
+        /// `onSaved` runs first and mutes the config watcher, so the write we are about to
+        /// do is not read back as a foreign edit while pending is still live. `afterSaved`
+        /// runs once the write has succeeded and re-reads the file into the daemon's live
+        /// config, returning false if that read failed.
+        ///
+        /// The second one is not optional and not cosmetic. Muting the watcher is what
+        /// makes it necessary: FileSystemWatcher discards suppressed events, it does not
+        /// queue them, so without an explicit reload here NOTHING ever reloads after a
+        /// save. See Save() for the two failures that causes.</summary>
         public static void Init(Func<DaemonConfig> cfg, StyleStore styles, string configPath,
-                                Action onSaved, Action<Activity, int> forceState)
+                                Action onSaved, Action<Activity, int> forceState, Func<bool> afterSaved)
         {
             _cfg = cfg; _styles = styles; _configPath = configPath;
-            _onSaved = onSaved; _force = forceState;
+            _onSaved = onSaved; _force = forceState; _afterSaved = afterSaved;
         }
 
         public static HttpResponse Get(HttpRequest req)
@@ -258,9 +272,44 @@ namespace GoveeLights
                     return HttpResponse.Text(500, "save failed: " + err);
                 }
 
+                // Re-read the file we just wrote, BEFORE dropping pending.
+                //
+                // The daemon's live config is assigned in exactly two places: startup, and
+                // the watcher - which we just muted for this very write. Without an
+                // explicit reload the daemon ends a successful save holding disk = new
+                // states, memory = old states, pending = empty. That breaks twice:
+                //
+                //   * visually - the moment Revert() drops pending, the strip snaps back
+                //     to the pre-edit style and /styles reports the old value as "config";
+                //   * destructively - the NEXT save calls Merged() on that same stale
+                //     config, so it writes stale + patch_B and erases patch_A, reporting
+                //     success both times.
+                //
+                // Reload from disk rather than installing `merged` directly: that re-runs
+                // Normalize()/Recase and proves the file the user now has is the file the
+                // daemon is running.
+                var reloaded = _afterSaved == null || _afterSaved();
+
+                if (!reloaded)
+                {
+                    // The write itself succeeded, so the user's edit IS on disk - this is
+                    // not a failed save and must not be reported as one. But the live
+                    // config is now known-stale, and clearing pending against a stale
+                    // config is precisely the data-loss path above. Keeping pending costs
+                    // an "unsaved" marker that is arguably already true (the daemon has not
+                    // re-read the file); clearing it would cost the user this edit the next
+                    // time they save. Pending stays.
+                    Log.Warn("style_saved_reload_failed",
+                        "config written but could not be re-read; keeping pending edits so a later save cannot drop them",
+                        new Dictionary<string, object> { { "path", _configPath } });
+                    return HttpResponse.Json("{\"ok\":true,\"saved\":true,\"reloaded\":false,\"warning\":" +
+                        _json.Serialize("Saved, but the daemon could not re-read config.json - your edits are still " +
+                                        "marked unsaved on purpose. Check the log, then restart the daemon.") + "}");
+                }
+
                 _styles.Revert();
                 Log.Info("style_saved", _configPath);
-                return HttpResponse.Json("{\"ok\":true,\"saved\":true}");
+                return HttpResponse.Json("{\"ok\":true,\"saved\":true,\"reloaded\":true}");
             }
         }
 

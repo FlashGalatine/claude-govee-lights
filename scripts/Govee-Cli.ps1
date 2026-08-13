@@ -54,7 +54,14 @@ function Parse-StyleArgs {
     # reset, 'seconds' for preview). Anything that is neither a known style field nor
     # in this list is a typo, not a silently-ignored no-op - '--colour' (not '--color')
     # is the realistic case, since the table header and detail view both print "colour".
-    param([string[]] $Tokens, [string[]] $ExtraFlags = @())
+    #
+    # NoStyleFlagsFor names the verb when this call site never sends a patch at all
+    # ('styles', 'theme'). Without it those verbs parse '--color FF0000' perfectly, drop
+    # it on the floor and report success - the same "a typed argument silently did
+    # nothing" defect the unknown-flag check above exists to prevent, reached through a
+    # different door. Rejected here rather than in the branch so the message can name the
+    # flag the user actually typed, in the order they typed it.
+    param([string[]] $Tokens, [string[]] $ExtraFlags = @(), [string] $NoStyleFlagsFor)
     $positional = @()
     $patch = @{}
     $flags = @{}
@@ -75,6 +82,9 @@ function Parse-StyleArgs {
             if ($value -like '--*') { throw "missing value for --$name" }
 
             if ($StyleFields.ContainsKey($name)) {
+                if ($NoStyleFlagsFor) {
+                    throw "--$name is a style field and '$NoStyleFlagsFor' does not take one; use '/govee set' to change a style, or '/govee preview' to try one."
+                }
                 switch ($StyleFields[$name]) {
                     'double' {
                         $d = 0.0
@@ -349,7 +359,8 @@ switch ($Command.ToLowerInvariant()) {
     }
 
     'styles' {
-        $parsed = Parse-StyleArgs $Rest
+        # 'styles' only ever reads - it has no patch to put a style field into.
+        $parsed = Parse-StyleArgs $Rest -NoStyleFlagsFor 'styles'
         $state = if ($parsed.Positional.Count -gt 0) { $parsed.Positional[0] } else { $null }
         $path = if ($state) { "/styles?state=$([uri]::EscapeDataString($state))" } else { '/styles' }
         $s = Call $path
@@ -416,7 +427,14 @@ switch ($Command.ToLowerInvariant()) {
     'save' {
         $r = Call '/styles/save' 'Post'
         if (-not $r) { Show-CallFailure; break }
-        if ($r.saved) { Write-Output "Saved to config.json. Comments and other settings were left alone." }
+        if ($r.saved) {
+            Write-Output "Saved to config.json. Comments and other settings were left alone."
+            # The write can succeed while the daemon fails to re-read the file. It says so
+            # rather than clearing the pending edits (see StyleRoutes.Save), and that is
+            # worth repeating here: the user would otherwise see "Saved." followed by
+            # /styles still reporting unsaved changes, with nothing explaining why.
+            if ($r.warning) { Write-Output $r.warning }
+        }
         else { Write-Output "Nothing to save." }
     }
 
@@ -438,18 +456,35 @@ switch ($Command.ToLowerInvariant()) {
             # rules and a bad value here should read like every other field's error
             # instead of an unrelated-looking type-conversion exception.
             $secs = 0.0
-            if (-not [double]::TryParse($parsed.Flags['seconds'], [System.Globalization.NumberStyles]::Float, $InvariantCulture, [ref] $secs)) {
+            # NaN and Infinity are rejected alongside a parse failure: .NET's TryParse
+            # accepts both by name, and either one survives the clamp below to throw a raw
+            # cast error - the very thing the clamp is there to prevent.
+            if (-not [double]::TryParse($parsed.Flags['seconds'], [System.Globalization.NumberStyles]::Float, $InvariantCulture, [ref] $secs) -or
+                [double]::IsNaN($secs) -or [double]::IsInfinity($secs)) {
                 throw "--seconds expects a number, got '$($parsed.Flags['seconds'])'"
             }
-            $hold = [int]($secs * 1000)
+            # Clamp BEFORE the cast, to the same 0.5s-60s window /preview enforces. A bare
+            # [int] cast of something like --seconds 999999999 overflows and throws a raw
+            # conversion error, which the outer catch prints verbatim - nothing like the
+            # tidy "--seconds expects a number" one line above it.
+            $hold = [int][math]::Round([math]::Max(500.0, [math]::Min(60000.0, $secs * 1000)))
         }
-        $r = Call '/preview' 'Post' @{ state = $parsed.Positional[0]; patch = $parsed.Patch; holdMs = $hold }
+        $body = @{ state = $parsed.Positional[0]; holdMs = $hold }
+        # Only send a patch when one was actually typed. StyleRoutes.Preview treats a
+        # non-null empty object as a patch and registers a preview slot for it, so a bare
+        # '/govee preview Thinking' would otherwise make /styles report
+        # "+ preview (unsaved)" for eight seconds while contributing nothing to the look.
+        if ($parsed.Patch.Count -gt 0) { $body['patch'] = $parsed.Patch }
+        $r = Call '/preview' 'Post' $body
         if (-not $r) { Show-CallFailure; break }
         Write-Output "Previewing $($r.state) for $([math]::Round($r.holdMs / 1000))s - watch your lights. Nothing was changed."
     }
 
     'theme' {
-        $parsed = Parse-StyleArgs $Rest
+        # A theme IS the palette - none of list/apply/save sends a patch, so
+        # 'theme apply muted --color FF0000' has no colour to apply and must say so
+        # rather than reporting a clean success it did not deliver.
+        $parsed = Parse-StyleArgs $Rest -NoStyleFlagsFor 'theme'
         $sub = if ($parsed.Positional.Count -gt 0) { $parsed.Positional[0].ToLowerInvariant() } else { 'list' }
         $name = if ($parsed.Positional.Count -gt 1) { $parsed.Positional[1] } else { $null }
 

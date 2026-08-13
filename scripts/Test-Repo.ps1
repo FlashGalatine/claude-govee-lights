@@ -228,6 +228,45 @@ if (Test-Path $programCs) {
     }
 } else { No 'Program.cs exists' $programCs }
 
+# ------------------------------------------------- save reload wiring
+Section 'Save reloads the config'
+# A cross-file wiring gap that no single-file review can see, and that fails silently in
+# both directions: after a successful /govee save the daemon must re-read config.json.
+# StyleRoutes mutes the watcher for its own write, and a suppressed FileSystemWatcher
+# event is DROPPED, not queued - so without an explicit reload callback nothing ever
+# reassigns _cfg. The saved style stops rendering the moment pending is cleared, and the
+# next save recomputes its merge from the stale config and erases what this one wrote,
+# reporting success both times.
+#
+# Asserted from both sides: StyleRoutes must call the callback, and Program must pass one
+# that actually reloads. Either half alone is satisfied by wiring that does nothing.
+$stylesCs = Join-Path $root 'src/GoveeLights.Daemon/StyleRoutes.cs'
+if ((Test-Path $stylesCs) -and (Test-Path $programCs)) {
+    $sr = Get-Content $stylesCs -Raw
+    if ($sr -match '_afterSaved\(\)') {
+        Ok 'StyleRoutes.Save invokes its post-save reload callback'
+    } else {
+        No 'StyleRoutes.Save never invokes a post-save reload callback' `
+           'A saved style would stop rendering, and the next save would overwrite this one.'
+    }
+
+    # The Init call spans lines, so match the whole argument list up to its ');'.
+    $init = [regex]::Match($ps, '(?s)StyleRoutes\.Init\((.*?)\);')
+    if ($init.Success -and $init.Groups[1].Value -match 'ReloadConfig') {
+        Ok 'Program passes a config reload into StyleRoutes.Init'
+    } else {
+        No 'Program does not pass a config reload into StyleRoutes.Init' `
+           'The daemon would keep rendering - and saving from - the config it had before the write.'
+    }
+
+    if ($ps -match '(?s)static bool ReloadConfig\(.*?lock \(_cfgGate\) _cfg = fresh;') {
+        Ok 'ReloadConfig re-reads from disk and installs it as the live config'
+    } else {
+        No 'ReloadConfig does not install a freshly loaded config under _cfgGate' `
+           'Reloading without assigning _cfg leaves memory and disk disagreeing.'
+    }
+} else { No 'StyleRoutes.cs and Program.cs both exist' "$stylesCs / $programCs" }
+
 # ------------------------------------------------------- effects engine
 Section 'Effects engine'
 # Effects is pure and deterministic, so CI can assert on real render output with no
@@ -814,13 +853,16 @@ if (-not $exe) {
         Ok 'TrySave round-trips through --out and preserves comments'
     } else { No 'TrySave via --out lost a comment or missed the block' $rOut }
 
-    # A 4-space-indented file must come back 4-space-indented, not the 2 the dry-run path
-    # above hardcodes - this is what makes the indent-preservation logic real rather than
-    # merely coincident with every other fixture happening to be 2-space.
+    # The indent must come from the target file, not from a constant. The fixture puts its
+    # depth-1 keys at 4 spaces, so TrySave picks up indent=4 and RenderStates lays entries
+    # out at indent+2 = 6. The dry-run path above hardcodes indent=2, which would put them
+    # at 4 - so this exact column is what separates "read the file" from "assumed 2", and
+    # it is deliberately NOT the fixture's own 8-space depth-2 column: RenderStates uses
+    # its own +2 convention rather than reproducing the file's nesting step.
     $rIndent = Invoke-SpliceToFile 'splice-indent4.json' $newStates
     if ($rIndent -match '(?m)^      "Thinking":' -and $rIndent -match '#ABCDEF' -and $rIndent -notmatch '#111111') {
-        Ok 'TrySave preserves a 4-space file''s own indentation'
-    } else { No 'TrySave via --out did not preserve 4-space indentation' $rIndent }
+        Ok 'TrySave derives its indent from the target file rather than a hardcoded 2'
+    } else { No 'TrySave via --out did not derive the indent from the file' $rIndent }
 
     # ---- Merged() coverage gap ----------------------------------------------
     # StyleStore.Merged is what save actually feeds RenderStates, and it had no direct
@@ -976,16 +1018,61 @@ if (-not $exe) {
 # rather than inside the $exe-gated block above, and still catches drift on the
 # documented no-build SKIP path.
 #
+# The verb list is READ FROM THE README, not restated here. A hardcoded list only ever
+# proves that the seven names in this file exist in that file: documenting a new verb
+# without implementing it - the exact drift the check is named for - left it green.
+Section 'Documented verbs'
+$cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
+$readmeText = Get-Content (Join-Path $root 'README.md') -Raw
+
+# The Commands section is a fenced block of "/govee <verb>   description" lines, which
+# is a stable enough shape to parse: one verb per line, always the first token after
+# "/govee", with alternatives written as "on|off". Anything else on the line (an
+# argument placeholder like "<s>", the description) is ignored.
+$cmdBlock = [regex]::Match($readmeText, '(?ms)^##[ \t]+Commands[ \t]*(?:\r?\n)+```[ \t]*\r?\n(.*?)^```')
+$documentedVerbs = @()
+if ($cmdBlock.Success) {
+    foreach ($line in ($cmdBlock.Groups[1].Value -split '\r?\n')) {
+        $m = [regex]::Match($line, '^\s*/govee\s+([A-Za-z][A-Za-z0-9|]*)')
+        if (-not $m.Success) { continue }
+        foreach ($v in $m.Groups[1].Value.Split('|')) {
+            if ($v) { $documentedVerbs += $v.ToLowerInvariant() }
+        }
+    }
+}
+$documentedVerbs = @($documentedVerbs | Sort-Object -Unique)
+
+if (-not $cmdBlock.Success) {
+    No 'README.md has a fenced Commands block' `
+       'The documented-verb check reads its verbs from there; without it nothing guards doc/CLI drift.'
+} else {
+    Ok "README Commands section lists $($documentedVerbs.Count) verbs" ($documentedVerbs -join ', ')
+}
+
+# Guard the section itself against regression. Extraction that quietly stopped finding
+# anything would leave the loop below iterating over an empty list and passing - and the
+# control-plane verbs are the ones this branch added, so silently dropping one from the
+# docs is a real regression in its own right.
+$mustBeDocumented = @('styles','set','reset','save','revert','preview','theme')
+$undocumented = @($mustBeDocumented | Where-Object { $documentedVerbs -notcontains $_ })
+if ($undocumented.Count -eq 0) { Ok 'README documents every control-plane verb' }
+else { No 'a control-plane verb is missing from the README Commands section' ($undocumented -join ', ') }
+
 # Matched at exactly 4 leading spaces: the top-level `switch ($Command)` cases (e.g.
 # `    'save' {`) sit at that indent, while the nested `theme` sub-switch's own
 # `'save' {` case sits three levels deeper at 12 spaces. `save` is the only verb name
 # that collides between the two switches - matching any leading whitespace would let
 # the nested case stand in for the top-level one and pass even if the real `save`
 # verb were deleted.
-$cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
+#
+# Two case shapes count, both at that same indent: a plain `'status' {`, and the
+# multi-value condition form `{ $_ -in 'on', 'enable' } {` that `on` and `off` use.
 $missingVerbs = @()
-foreach ($v in 'styles','set','reset','save','revert','preview','theme') {
-    if ($cliText -notmatch "(?m)^    '$v'\s*\{") { $missingVerbs += $v }
+foreach ($v in $documentedVerbs) {
+    $q = [regex]::Escape($v)
+    $plain = '(?m)^    ' + "'$q'" + '\s*\{'
+    $multi = '(?m)^    \{[^}\r\n]*' + "'$q'" + '[^}\r\n]*\}\s*\{'
+    if ($cliText -notmatch $plain -and $cliText -notmatch $multi) { $missingVerbs += $v }
 }
 if ($missingVerbs.Count -eq 0) { Ok 'every documented verb exists in the CLI' }
 else { No 'a documented verb is missing from the CLI' ($missingVerbs -join ', ') }
