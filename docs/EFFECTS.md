@@ -23,12 +23,23 @@ ten different meanings for "reverse." That pipeline is not perfectly uniform, th
 | `Depth` | 0–1 | Intensity floor. Weights are rescaled into `[Depth, 1]`, so the colour never fully disappears. Ignored by `rainbow`. Defaults to `0`; only `breathe`, `pulse`, `blink` and `sparkle` raise it via their own built-in defaults (see the effects table) — every other effect keeps the base value of `0`. Values outside `0..1` are clamped to the nearer end. |
 | `FullSeconds` | number | `progress` only: seconds until the bar is full. Defaults to `30`; a value `<= 0` also falls back to `30`. |
 
-Any field may be omitted. Omitted means *inherit*, checked in this order — strongest
-first: a device's own `States` entry (set inside that device's block in `Devices`),
-then the global `States` entry, then the built-in per-state default, then the
-effect's own default. This is why you can set just `Hz` on one state and leave
-everything else alone, and why one device can override a single field of one state
-without restating the rest.
+Any field may be omitted. Omitted means *inherit*, and the layers are, strongest
+first:
+
+1. a device's own `States` entry (set inside that device's block in `Devices`)
+2. **unsaved edits** from `/govee set` or `/govee theme apply` — these sit exactly
+   where the global `States` block sits, which is why `/govee save` can write them
+   straight into it
+3. the global `States` entry in `config.json`
+4. the built-in default for that state
+5. the effect's own default
+
+This is why you can set just `Hz` on one state and leave everything else alone, and
+why one device can override a single field of one state without restating the rest.
+
+`/govee styles` names the layer each value came from, and marks unsaved edits.
+Preview (`/govee preview`) is stronger than all of them and expires on its own — it
+is a look, not an edit.
 
 ## Defaults and out-of-range values
 

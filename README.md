@@ -105,9 +105,27 @@ therefore render as one continuous cyan, not twenty flashes.
 
 ## Customising the lights
 
-Each activity state has its own colour and animation, set in the `States` block of
-`%LOCALAPPDATA%\ClaudeGovee\config.json`. The file is hot-reloaded — save it and the
-lights change immediately, no restart needed.
+Each activity state has its own colour and animation. Change one from the prompt:
+
+```
+/govee styles                                    show everything, and where each value came from
+/govee set Thinking --color FF0000 --hz 2        apply it live
+/govee save                                      keep it
+```
+
+`set` takes effect immediately but writes nothing — experiment freely and
+`/govee revert` if you don't like it. `save` splices only the `States` block back
+into `%LOCALAPPDATA%\ClaudeGovee\config.json`, so your comments and every other
+setting survive untouched.
+
+`/govee preview Thinking --effect comet --tail 2.5` shows a style for a few
+seconds without changing anything at all, and `/govee reset Thinking` puts a
+state back to its built-in default.
+
+Whole palettes come as themes — `/govee theme list`, `/govee theme apply muted`,
+and `/govee theme save <name>` to keep your current setup as one.
+
+The config file is still there and still hot-reloads, if you prefer editing it:
 
 ```json
 "States": {

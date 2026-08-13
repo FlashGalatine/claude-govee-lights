@@ -969,6 +969,15 @@ if (-not $exe) {
     } finally {
         Remove-Item -LiteralPath $themesScratch -Recurse -Force -ErrorAction SilentlyContinue
     }
+
+    # Documented verbs must exist in the CLI, or the README teaches commands that fail.
+    $cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
+    $missingVerbs = @()
+    foreach ($v in 'styles','set','reset','save','revert','preview','theme') {
+        if ($cliText -notmatch "(?m)^\s*'$v'\s*\{") { $missingVerbs += $v }
+    }
+    if ($missingVerbs.Count -eq 0) { Ok 'every documented verb exists in the CLI' }
+    else { No 'a documented verb is missing from the CLI' ($missingVerbs -join ', ') }
 }
 
 # Shipping an example config that names an effect the engine does not implement
