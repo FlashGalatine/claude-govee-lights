@@ -22,12 +22,17 @@ namespace GoveeLights
 
     public static class Palette
     {
-        // Not exported: only Norm reads it, and a public string[] hands every caller a
-        // writable copy of the effect list.
+        // Fields stay private; the *Names() accessors below hand out clones instead.
         static readonly string[] KnownEffects =
             { "solid", "breathe", "pulse", "blink", "chase", "comet", "wipe", "progress", "sparkle", "rainbow" };
         static readonly string[] KnownDirections = { "forward", "reverse", "pingpong" };
         static readonly string[] KnownEasings    = { "linear", "sine", "cubic", "expo" };
+
+        // Copies, not the arrays themselves: a public static readonly string[] hands
+        // every caller a writable reference to the engine's own vocabulary.
+        public static string[] EffectNames() { return (string[])KnownEffects.Clone(); }
+        public static string[] DirectionNames() { return (string[])KnownDirections.Clone(); }
+        public static string[] EasingNames() { return (string[])KnownEasings.Clone(); }
 
         /// <summary>Built-in per-state defaults. Config entries layer over these.</summary>
         public static Dictionary<string, StateStyle> Defaults()
@@ -88,7 +93,11 @@ namespace GoveeLights
 
         /// <summary>Segment-aware resolve from a config, and the only public way in that
         /// takes one. Layers, weakest first: effect defaults, state defaults, config,
-        /// device - a non-null field in a later layer wins; null means inherit.
+        /// pending, device, preview - a non-null field in a later layer wins; null means
+        /// inherit. Pending sits exactly where /govee set edits live: stronger than the
+        /// config file, weaker than a device's own override. Preview is strongest of all
+        /// and transient. See BuildLayers for how a cleared state and a pending patch
+        /// combine independently.
         ///
         /// A spatial effect has nothing to paint on a device with one zone, so on
         /// segments &lt;= 1 it re-resolves with Effect forced to "breathe" - which lets
@@ -96,24 +105,45 @@ namespace GoveeLights
         /// re-deriving that floor for a fallback it never asked for. There is deliberately
         /// no segment-blind overload: one shipped on this branch, and every caller that
         /// reached for it hard-cut single-zone devices to black.</summary>
-        public static ResolvedStyle ResolveFor(DaemonConfig cfg, DeviceConfig device, Activity state, int segments)
+        public static ResolvedStyle ResolveFor(DaemonConfig cfg, StyleStore pending,
+                                               DeviceConfig device, Activity state, int segments)
         {
-            return ResolveStyleFor(segments, BuildLayers(cfg, device, state));
+            return ResolveStyleFor(segments, BuildLayers(cfg, pending, device, state));
         }
 
-        static StateStyle[] BuildLayers(DaemonConfig cfg, DeviceConfig device, Activity state)
+        static StateStyle[] BuildLayers(DaemonConfig cfg, StyleStore pending,
+                                        DeviceConfig device, Activity state)
         {
             var key = state.ToString();
-            var layers = new List<StateStyle>(3);
+            var layers = new List<StateStyle>(5);
 
             StateStyle s;
             if (_stateDefaults.TryGetValue(key, out s)) layers.Add(s);
             else layers.Add(_stateDefaults["Idle"]);
 
-            if (cfg != null && cfg.States != null && cfg.States.TryGetValue(key, out s) && s != null)
-                layers.Add(s);
-            if (device != null && device.States != null && device.States.TryGetValue(key, out s) && s != null)
-                layers.Add(s);
+            // Clearing and patching are independent facts (StyleStore keeps them in
+            // separate collections): a cleared state drops the config layer regardless
+            // of whether a patch exists, and a patch applies regardless of whether the
+            // state was cleared - so "reset Thinking" then "set Thinking --hz 2" lands on
+            // built-in-plus-patch, not on the config entry the reset was meant to drop.
+            var cleared = pending != null && pending.IsCleared(key);
+            if (!cleared && cfg != null && cfg.States != null &&
+                cfg.States.TryGetValue(key, out s) && s != null) layers.Add(s);
+
+            StateStyle pend;
+            if (pending != null && pending.TryPending(key, out pend) && pend != null) layers.Add(pend);
+
+            if (device != null && device.States != null &&
+                device.States.TryGetValue(key, out s) && s != null) layers.Add(s);
+
+            // Preview is deliberately strongest and deliberately transient: it exists so
+            // you can see a style you have not committed to, including over a device
+            // override that would otherwise mask it.
+            if (pending != null)
+            {
+                var prev = pending.Preview(key);
+                if (prev != null) layers.Add(prev);
+            }
 
             return layers.ToArray();
         }

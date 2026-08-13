@@ -482,6 +482,30 @@ git add src/GoveeLights.Daemon/StyleStore.cs src/GoveeLights.Daemon/Palette.cs \
 git commit -m "Add the pending style layer between config and device"
 ```
 
+**Amended during review.** The three-valued `_pending` model above (absent | null |
+patch) cannot represent "cleared *and* patched": a `Set` after a `Reset` lifted the
+tombstone, so both the resolve and `Merged()` restored config values the user had just
+cleared — and Tasks 4-6 drive exactly that sequence. `StyleStore` now holds a separate
+`HashSet<string> _cleared` beside `_pending`, both under the same lock, with
+`bool IsCleared(string)` exposed; `Reset`/`ResetAll` add to `_cleared` without touching
+patches, `Set` leaves `_cleared` alone, `Revert` clears both, `Merged` uses a null basis
+for cleared states, and `BuildLayers` skips `cfg.States` when `IsCleared(key)`. The
+repository is the authority; the code in this task's steps is the pre-fix version.
+
+A consequence for Task 5, **corrected after review**: an earlier version of this note
+claimed `ThemeApply` could call `ResetAll()` then `Set` per state and get totality for
+free. That is wrong, and the error is worth recording. `ResetAll` adds to `_cleared`
+only — it deliberately does not touch `_pending`, because `/styles/reset --all` means
+"suppress the config layer, keep patches". So a reset before the `Set` loop does nothing
+to the *previous* theme, which is still sitting in `_pending`, and `Set` merges field-wise
+over it: a field the incoming theme leaves null inherits the outgoing theme's value.
+Worse, a state the theme never mentions keeps any earlier `/styles/set` patch, and
+`Merged()` writes it into a saved theme file.
+
+`ThemeApply` must therefore call `Revert()` **and** `ResetAll(cfg)` before applying, inside
+the same lock. Revert clears both structures; ResetAll then re-suppresses the config layer.
+Discarding prior unsaved edits is exactly what "applying a theme is total" means.
+
 ---
 
 ### Task 2: The config splicer

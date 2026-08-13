@@ -1,0 +1,9 @@
+{
+  "_comment": "KEEP ME",
+  "ApiGuid": "00000000-0000-0000-0000-000000000000",
+  "Port": 17321,
+  "States": {
+    "Thinking": { "Color": "#111111" }
+  },
+  "_comment_tail": "KEEP ME TOO"
+}

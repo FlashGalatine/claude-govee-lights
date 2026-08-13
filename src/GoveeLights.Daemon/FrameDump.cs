@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Web.Script.Serialization;
 
@@ -25,6 +27,26 @@ namespace GoveeLights
             // stdout so the frame stream stays machine-readable.
             Log.AlsoConsole = true;
             Log.ConsoleToStderr = true;
+
+            // Every mode below that touches Themes must see this before it runs: the
+            // production default is the live %LOCALAPPDATA% folder the running daemon
+            // also uses, so a test suite writing themes with no override would collide
+            // with whatever is actually installed on the machine running it.
+            var themesDir = Arg(args, "--themes-dir", null);
+            if (!string.IsNullOrEmpty(themesDir)) Themes.UserDirOverride = themesDir;
+
+            if (HasFlag(args, "--list-known")) return ListKnown();
+            if (HasFlag(args, "--resolve-states")) return ResolveStates(args);
+            if (HasFlag(args, "--splice-states")) return SpliceStates(args);
+            if (HasFlag(args, "--list-themes")) return ListThemes();
+            if (HasFlag(args, "--save-theme")) return SaveTheme(args);
+            if (HasFlag(args, "--check-theme-name"))
+            {
+                var n = Arg(args, "--check-theme-name", null);
+                Console.Out.WriteLine(Themes.IsValidName(n) ? "valid" : "invalid");
+                Console.Out.Flush();
+                return 0;
+            }
 
             var segments = ArgInt(args, "--segments", 10);
             var seconds  = ArgDouble(args, "--seconds", 2.0);
@@ -77,7 +99,7 @@ namespace GoveeLights
                         return 2;
                     }
                 }
-                style = Palette.ResolveFor(cfg, dev, a, segments);
+                style = Palette.ResolveFor(cfg, null, dev, a, segments);
             }
 
             ResolvedStyle fromStyle = null;
@@ -90,7 +112,7 @@ namespace GoveeLights
                     Console.Error.WriteLine("unknown --from: " + fromName);
                     return 2;
                 }
-                fromStyle = Palette.ResolveFor(null, null, fa, segments);
+                fromStyle = Palette.ResolveFor(null, null, null, fa, segments);
             }
 
             var w = Console.Out;
@@ -119,6 +141,276 @@ namespace GoveeLights
                             string.Join(",", cells.Select(c => c.ToHex()).ToArray()));
             }
             w.Flush();
+            return 0;
+        }
+
+        static bool HasFlag(string[] args, string name)
+        {
+            for (int i = 0; i < args.Length; i++)
+                if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>The engine's vocabulary, so Test-Repo and the CLI can validate against
+        /// the real lists instead of restating them.</summary>
+        static int ListKnown()
+        {
+            Console.Out.WriteLine("effects," + string.Join(",", Palette.EffectNames()));
+            Console.Out.WriteLine("directions," + string.Join(",", Palette.DirectionNames()));
+            Console.Out.WriteLine("easings," + string.Join(",", Palette.EasingNames()));
+            Console.Out.Flush();
+            return 0;
+        }
+
+        /// <summary>Every theme, built-in and user, so the CLI can list what is available
+        /// without duplicating Themes' own notion of what "available" means.
+        ///
+        /// A built-in row's States must come from BuiltIn() directly, not TryLoad: when
+        /// a user theme shadows a built-in of the same name, TryLoad prefers the user
+        /// file, so routing the "builtin=yes" row's count through it would report the
+        /// *user* theme's state count against the built-in's name - a user theme saved
+        /// with three states would make a complete built-in look broken. Shadowed and
+        /// complete both surface here for the same reason "states" does: so a caller can
+        /// tell what is actually in force without loading every theme itself.</summary>
+        static int ListThemes()
+        {
+            var builtin = Themes.BuiltIn();
+            var w = Console.Out;
+            w.WriteLine("name,builtin,states,description,shadowed,complete");
+            foreach (var info in Themes.List())
+            {
+                Dictionary<string, StateStyle> states;
+                if (info.Builtin)
+                {
+                    Theme bt;
+                    states = builtin.TryGetValue(info.Name, out bt) ? bt.States : null;
+                }
+                else
+                {
+                    Theme t; string err;
+                    states = Themes.TryLoad(info.Name, out t, out err) ? t.States : null;
+                }
+                var count = states != null ? states.Count : 0;
+                w.WriteLine(string.Join(",", new[]
+                {
+                    info.Name, info.Builtin ? "yes" : "no",
+                    count.ToString(CultureInfo.InvariantCulture),
+                    (info.Description ?? "").Replace(",", " "),
+                    info.Shadowed ? "yes" : "no",
+                    Themes.IsComplete(states) ? "yes" : "no"
+                }));
+            }
+            w.Flush();
+            return 0;
+        }
+
+        /// <summary>Write a theme to disk through Themes.TrySave, so the save path - the
+        /// one piece of theme I/O nothing else in this file exercises - is reachable
+        /// without hardware. --states takes the same shape --splice-states' --states
+        /// does: a literal state-name to StateStyle map.</summary>
+        static int SaveTheme(string[] args)
+        {
+            var name = Arg(args, "--save-theme", null);
+            var statesJson = Arg(args, "--states", null);
+            if (string.IsNullOrEmpty(statesJson)) { Console.Error.WriteLine("--save-theme needs --states"); return 2; }
+
+            Dictionary<string, StateStyle> parsed;
+            try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(statesJson); }
+            catch (Exception ex) { Console.Error.WriteLine("bad --states: " + ex.Message); return 2; }
+
+            string error;
+            if (!Themes.TrySave(name, parsed, out error))
+            {
+                Console.Error.WriteLine("save failed: " + error);
+                return 2;
+            }
+            Console.Out.WriteLine("saved");
+            Console.Out.Flush();
+            return 0;
+        }
+
+        /// <summary>Resolve every state through the full layer stack and print it, so the
+        /// merge is testable without hardware. --pending takes the same shape StyleStore
+        /// holds: state name to a partial StateStyle, or literal null for a tombstone.
+        /// --cleared is a comma-separated list of states to Reset before --pending is
+        /// applied, so a reset-then-set sequence (StyleStore keeps the two independent)
+        /// is testable too - --pending alone cannot express that ordering. --theme seeds
+        /// the store from a whole theme before --pending is applied, so a theme's own
+        /// resolved output is testable, and an explicit --pending still wins per field.</summary>
+        static int ResolveStates(string[] args)
+        {
+            var configPath = Arg(args, "--config", null);
+            DaemonConfig cfg = null;
+            if (!string.IsNullOrEmpty(configPath))
+            {
+                string e;
+                cfg = DaemonConfig.Load(configPath, out e);
+                if (cfg == null) { Console.Error.WriteLine("bad --config: " + e); return 2; }
+            }
+
+            var store = new StyleStore();
+            var clearedArg = Arg(args, "--cleared", null);
+            if (!string.IsNullOrEmpty(clearedArg))
+                foreach (var name in clearedArg.Split(','))
+                {
+                    var trimmed = name.Trim();
+                    if (trimmed.Length > 0) store.Reset(trimmed);
+                }
+
+            // Applied before --pending, not after: StyleStore.Set merges a new patch's
+            // non-null fields over whatever is already pending for that state, so the
+            // patch applied *second* is the one that wins per field. Seeding from the
+            // theme here and letting --pending layer on top afterwards is what makes an
+            // explicit --pending able to override a theme rather than the reverse.
+            var themeName = Arg(args, "--theme", null);
+            if (!string.IsNullOrEmpty(themeName))
+            {
+                Theme t; string terr;
+                if (!Themes.TryLoad(themeName, out t, out terr))
+                {
+                    Console.Error.WriteLine("bad --theme: " + terr);
+                    return 2;
+                }
+                foreach (var kv in t.States) store.Set(kv.Key, kv.Value);
+            }
+
+            var pendingJson = Arg(args, "--pending", null);
+            if (!string.IsNullOrEmpty(pendingJson))
+            {
+                Dictionary<string, StateStyle> parsed;
+                try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(pendingJson); }
+                catch (Exception ex) { Console.Error.WriteLine("bad --pending: " + ex.Message); return 2; }
+                if (parsed != null)
+                    foreach (var kv in parsed)
+                    {
+                        if (kv.Value == null) store.Reset(kv.Key);
+                        else store.Set(kv.Key, kv.Value);
+                    }
+            }
+
+            DeviceConfig dev = null;
+            var deviceName = Arg(args, "--device", null);
+            if (!string.IsNullOrEmpty(deviceName))
+            {
+                // Every other bad argument in this harness reports and returns 2 rather
+                // than quietly answering a different question - a --device with no
+                // --config to look it up in must not silently resolve as "no device".
+                if (cfg == null) { Console.Error.WriteLine("--device requires --config"); return 2; }
+                dev = cfg.Devices.FirstOrDefault(x => x != null &&
+                          string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
+                if (dev == null)
+                {
+                    Console.Error.WriteLine("unknown --device: " + deviceName);
+                    return 2;
+                }
+            }
+
+            var segments = ArgInt(args, "--segments", 10);
+            if (segments < 1) segments = 1;
+
+            var w = Console.Out;
+            w.WriteLine("state,effect,color,color2,hz,brightness,direction,easing,tail,depth,fullseconds");
+            foreach (var name in Enum.GetNames(typeof(Activity)))
+            {
+                Activity a;
+                Enum.TryParse(name, true, out a);
+                var r = Palette.ResolveFor(cfg, store, dev, a, segments);
+                w.WriteLine(string.Join(",", new[]
+                {
+                    name, r.Effect, r.Color.ToHex(), r.HasColor2 ? r.Color2.ToHex() : "none",
+                    r.Hz.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.Brightness.ToString(CultureInfo.InvariantCulture),
+                    r.Direction, r.Easing,
+                    r.Tail.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.Depth.ToString("0.###", CultureInfo.InvariantCulture),
+                    r.FullSeconds.ToString("0.###", CultureInfo.InvariantCulture)
+                }));
+            }
+            w.Flush();
+            return 0;
+        }
+
+        /// <summary>Print the spliced config to stdout without writing anything, so the
+        /// riskiest code in the daemon is testable against hostile fixtures.
+        ///
+        /// --states is normally the literal States map to write, verbatim. But when
+        /// --cleared is also given (same comma-separated shape --resolve-states takes),
+        /// --states is instead read as patches: each is applied through a StyleStore
+        /// alongside the clears, and what gets spliced in is store.Merged(cfg). That is
+        /// the only way to exercise "cleared and also patched" end-to-end - Merged is
+        /// what save actually feeds RenderStates, and TrySpliceStates alone cannot express
+        /// "drop the config entry, then merge a patch onto nothing" the way Merged does.
+        ///
+        /// --out <path> routes the same states through ConfigWriter.TrySave against a
+        /// scratch copy at that path instead of printing a dry-run splice. Without it,
+        /// nothing ever calls TrySave: its round-trip guard, its atomic replace, and its
+        /// use of the target file's own indentation all go untested.</summary>
+        static int SpliceStates(string[] args)
+        {
+            var configPath = Arg(args, "--config", null);
+            if (string.IsNullOrEmpty(configPath)) { Console.Error.WriteLine("--splice-states needs --config"); return 2; }
+            if (!File.Exists(configPath)) { Console.Error.WriteLine("no such config: " + configPath); return 2; }
+
+            var statesJson = Arg(args, "--states", null);
+            if (string.IsNullOrEmpty(statesJson)) { Console.Error.WriteLine("--splice-states needs --states"); return 2; }
+
+            Dictionary<string, StateStyle> parsed;
+            try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(statesJson); }
+            catch (Exception ex) { Console.Error.WriteLine("bad --states: " + ex.Message); return 2; }
+            if (parsed == null) parsed = new Dictionary<string, StateStyle>();
+
+            Dictionary<string, StateStyle> states;
+            var clearedArg = Arg(args, "--cleared", null);
+            if (!string.IsNullOrEmpty(clearedArg))
+            {
+                string e;
+                var cfg = DaemonConfig.Load(configPath, out e);
+                if (cfg == null) { Console.Error.WriteLine("bad --config: " + e); return 2; }
+
+                var store = new StyleStore();
+                foreach (var name in clearedArg.Split(','))
+                {
+                    var trimmed = name.Trim();
+                    if (trimmed.Length > 0) store.Reset(trimmed);
+                }
+                foreach (var kv in parsed)
+                {
+                    if (kv.Value == null) store.Reset(kv.Key);
+                    else store.Set(kv.Key, kv.Value);
+                }
+                states = store.Merged(cfg);
+            }
+            else
+            {
+                states = parsed;
+            }
+
+            var outPath = Arg(args, "--out", null);
+            if (!string.IsNullOrEmpty(outPath))
+            {
+                try { File.Copy(configPath, outPath, true); }
+                catch (Exception ex) { Console.Error.WriteLine("could not stage --out: " + ex.Message); return 2; }
+
+                string saveError;
+                if (!ConfigWriter.TrySave(outPath, states, out saveError))
+                {
+                    Console.Error.WriteLine("save failed: " + saveError);
+                    return 2;
+                }
+                Console.Out.Write(File.ReadAllText(outPath));
+                Console.Out.Flush();
+                return 0;
+            }
+
+            var original = File.ReadAllText(configPath);
+            string result, error;
+            if (!ConfigWriter.TrySpliceStates(original, ConfigWriter.RenderStates(states, 2), out result, out error))
+            {
+                Console.Error.WriteLine("splice failed: " + error);
+                return 2;
+            }
+            Console.Out.Write(result);
+            Console.Out.Flush();
             return 0;
         }
 

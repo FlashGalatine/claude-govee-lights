@@ -1,0 +1,9 @@
+{
+  "Port": 17321,
+  "Devices": [
+    { "Name": "CeilingStrip", "States": { "Thinking": { "Effect": "solid" } } }
+  ],
+  "States": {
+    "Thinking": { "Color": "#111111" }
+  }
+}

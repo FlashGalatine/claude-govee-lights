@@ -1,0 +1,7 @@
+{
+  "Port": 17321,
+  "_comment": "a stray \" quote here, then this string literally contains \"States\": { \"Thinking\": { } } and must not be spliced",
+  "States": {
+    "Thinking": { "Color": "#111111" }
+  }
+}

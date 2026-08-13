@@ -35,9 +35,10 @@ where the config layer sits:
 ```
 effect defaults          (weakest)
 built-in state defaults
-cfg.States               on disk
+cfg.States               on disk        <- skipped when the state is cleared
 pending                  NEW - unsaved edits
-device.States            (strongest)
+device.States
+preview                  NEW - transient, expires on its own (strongest)
 ```
 
 The position is the whole point: the pending layer is a shadow of `cfg.States`,
@@ -63,9 +64,10 @@ public sealed class StyleStore
     public StateStyle Pending(string state);            // null if untouched
     public void Set(string state, StateStyle patch);    // field-wise; null means "leave"
     public void ApplyTheme(Theme t);                    // fills _pending for every state
-    public void Reset(string state);                    // tombstone for one state
-    public void ResetAll();                             // tombstone for every state
-    public void Revert();                               // discard _pending entirely
+    public void Reset(string state);                    // clear one state
+    public void ResetAll(DaemonConfig cfg);             // clear every state, incl. non-Activity config keys
+    public void Revert();                               // discard all unsaved edits
+    public bool IsCleared(string state);
     public Dictionary<string, StateStyle> Merged(DaemonConfig cfg);  // what save writes
 }
 ```
@@ -74,11 +76,17 @@ public sealed class StyleStore
 `device.States`. `Pick`/`PickN` already walk the layers weakest-first, so this
 is not new machinery.
 
-**`reset` needs a tombstone.** "Clear this state back to built-in" cannot be
-expressed as an all-null `StateStyle` — that means inherit, which is a no-op.
-So `_pending` holds a nullable entry, and *present-but-null* means suppress the
-config layer for this state. `Merged()` omits it and `save` writes a `States`
-block without it.
+**`reset` needs its own structure.** "Clear this state back to built-in" cannot
+be expressed as an all-null `StateStyle` — that means inherit, which is a no-op.
+Nor can it live in the same slot as a patch: a state can be **both cleared and
+patched**, which is what `/govee reset X` followed by `/govee set X --hz 2`
+means, and a single three-valued slot silently resurrects the cleared config
+values. So the store holds two structures under one lock — `_pending` for
+patches and `_cleared` for cleared states — and they are independent. `Reset`
+adds to `_cleared` and leaves any patch alone; `Set` leaves `_cleared` alone.
+`BuildLayers` skips the `cfg.States` layer for a cleared state; `Merged()`
+starts a cleared state from a null basis rather than its config entry, and omits
+it entirely when it has no patch.
 
 ## Interaction with the hot-reload watcher
 
@@ -110,11 +118,20 @@ comments, key order, whitespace, `_examples_states`.
 This is a hand-rolled splicer writing the user's file, so it carries three
 safeguards:
 
-- **Round-trip validation before the write lands.** Deserialize the spliced
-  result and confirm the `States` block matches what was intended. If it does
-  not parse, or does not match, abort and write nothing; `/govee save` reports
-  the failure and `_pending` stays intact. A splicer that silently corrupts a
-  config is worse than one that refuses.
+- **Round-trip validation before the write lands**, in three parts. The spliced
+  result must parse; the states it wrote must re-render to exactly the block
+  that was spliced in; and **every byte outside the replaced span must be
+  unchanged**, compared exactly against the original text. That third condition
+  is the one that protects the comments — a count of states cannot detect a
+  splice that landed in `Devices[].States` instead, because the counts match
+  whenever the two maps are the same size, which is the common case. If any
+  part fails, abort and write nothing; `/govee save` reports the failure and the
+  pending edits stay intact. A splicer that silently corrupts a config is worse
+  than one that refuses.
+- **A `States` key it cannot splice is refused, not worked around.** If a
+  depth-1 `States` exists but its value is not an object — `null`, an array, a
+  string — that is distinct from the key being absent. Treating the two alike
+  appends a second `States` member and leaves the file with duplicate keys.
 - **Atomic replace.** Write a temp file in the same directory, then
   `File.Replace`, so a crash or a full disk cannot truncate `config.json`.
 - **The file's own indentation.** Render at the 2-space convention `Prettify`
@@ -129,9 +146,9 @@ HTTP routes follow the existing flat-path convention (`/enable`, `/refresh`):
 |---|---|---|
 | `GET /styles` | — | every state's resolved style, source, and the dirty flag |
 | `POST /styles/set` | `{state, patch}` | field-wise patch into `_pending` |
-| `POST /styles/reset` | `{state}` or `{all:true}` | tombstone |
+| `POST /styles/reset` | `{state}` or `{all:true}` | clear back to built-in |
 | `POST /styles/save` | — | splice and write |
-| `POST /styles/revert` | — | clear `_pending` |
+| `POST /styles/revert` | — | discard all unsaved edits |
 | `GET /themes` | — | built-in and user themes |
 | `POST /themes/apply` | `{name}` | fill `_pending` from a theme |
 | `POST /themes/save` | `{name}` | write a user theme file |

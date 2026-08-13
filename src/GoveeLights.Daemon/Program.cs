@@ -17,6 +17,7 @@ namespace GoveeLights
         static readonly object _cfgGate = new object();
         static GoveeClient _govee;
         static SessionStore _sessions;
+        static readonly StyleStore _styles = new StyleStore();
         static HookMapper _mapper;
         static Renderer _renderer;
         static MiniHttpServer _http;
@@ -24,8 +25,21 @@ namespace GoveeLights
         static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         static readonly DateTime _startedAt = DateTime.UtcNow;
         static readonly ManualResetEventSlim _quit = new ManualResetEventSlim(false);
+        // Ticks, not a DateTime: SuppressWatch runs on a threadpool thread (the HTTP
+        // handler) and the Changed lambda reads it on the FileSystemWatcher thread.
+        // DateTime is an 8-byte struct with no atomicity guarantee for a plain field
+        // read/write on 32-bit; Interlocked over a long sidesteps the question entirely.
+        static long _suppressWatchUntilTicks;
 
         static DaemonConfig Cfg() { lock (_cfgGate) return _cfg; }
+
+        /// <summary>Mute the config watcher briefly. A save writes the file the watcher is
+        /// watching; without this the daemon reloads its own write, and a reload while
+        /// pending edits are live would rebuild the config underneath them.</summary>
+        public static void SuppressWatch(int ms)
+        {
+            Interlocked.Exchange(ref _suppressWatchUntilTicks, DateTime.UtcNow.AddMilliseconds(ms).Ticks);
+        }
 
         [STAThread]
         public static int Main(string[] args)
@@ -77,11 +91,20 @@ namespace GoveeLights
             };
             _mapper = new HookMapper(_sessions, _cfg.ToolClassMap);
             _govee = new GoveeClient(_cfg.GoveeDllPath, _cfg.ApiGuid);
-            _renderer = new Renderer(_govee, _sessions, Cfg);
+            _renderer = new Renderer(_govee, _sessions, Cfg, _styles);
 
             // A roster reloaded later (retry after a cold-start race, or /refresh) is
             // useless unless the render roster is rebuilt from it.
             _govee.DevicesLoaded = () => _renderer.SyncDevices();
+
+            // Both save callbacks matter, and they are a pair: SuppressWatch mutes the
+            // watcher for our own write, and ReloadConfig is then the ONLY thing that puts
+            // the newly-written file back into _cfg - a suppressed FileSystemWatcher event
+            // is dropped, not queued. Wiring the first without the second leaves the daemon
+            // rendering, and saving from, the config it had before the write.
+            StyleRoutes.Init(Cfg, _styles, configPath, () => SuppressWatch(3000),
+                             (a, ms) => _renderer.Force(a, ms),
+                             () => ReloadConfig(configPath, "styles saved"));
 
             // Bind before anything else observable: a second instance must lose here.
             _http = new MiniHttpServer(_cfg.Port, Handle);
@@ -164,6 +187,15 @@ namespace GoveeLights
                 case "/shutdown":
                     ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(150); _quit.Set(); });
                     return HttpResponse.Json("{\"ok\":true}");
+                case "/styles": return StyleRoutes.Get(req);
+                case "/styles/set": return StyleRoutes.Set(req);
+                case "/styles/reset": return StyleRoutes.Reset(req);
+                case "/styles/save": return StyleRoutes.Save(req);
+                case "/styles/revert": return StyleRoutes.Revert(req);
+                case "/themes": return StyleRoutes.ThemeList(req);
+                case "/themes/apply": return StyleRoutes.ThemeApply(req);
+                case "/themes/save": return StyleRoutes.ThemeSave(req);
+                case "/preview": return StyleRoutes.Preview(req);
                 default:
                     return HttpResponse.Text(404, "no such endpoint");
             }
@@ -290,6 +322,38 @@ namespace GoveeLights
 
         // ---- config hot-reload ------------------------------------------------------
 
+        /// <summary>Re-read the config file and install it as the live one.
+        ///
+        /// Two callers, deliberately sharing one body: the watcher (someone else edited the
+        /// file) and a successful /styles/save (we edited it, with the watcher muted so it
+        /// cannot). Both need exactly the same work done - Load, swap under _cfgGate, reset
+        /// the log level, rebuild the render roster - and a save that reloaded differently
+        /// from the watcher would be a second way for memory and disk to disagree.
+        ///
+        /// Returns false and leaves the previous config in place if the file cannot be
+        /// read: _cfg must never become null (the render thread reads it 25 times a
+        /// second), and the caller needs to know, since /styles/save decides whether it is
+        /// safe to clear pending edits on the strength of this answer.</summary>
+        static bool ReloadConfig(string path, string reason)
+        {
+            string err;
+            var fresh = DaemonConfig.Load(path, out err);
+            if (fresh == null)
+            {
+                Log.Warn("config_reload_failed", err ?? "unknown; keeping previous config",
+                    new Dictionary<string, object> { { "path", path }, { "reason", reason } });
+                return false;
+            }
+
+            lock (_cfgGate) _cfg = fresh;
+            Log.Level = fresh.ParsedLogLevel();
+            // Null only in a harness that never built one; the daemon always has a renderer
+            // by the time either caller can fire.
+            if (_renderer != null) _renderer.SyncDevices();
+            Log.Info("config_reloaded", path, new Dictionary<string, object> { { "reason", reason } });
+            return true;
+        }
+
         static void WatchConfig(string path)
         {
             try
@@ -302,22 +366,18 @@ namespace GoveeLights
                 DateTime last = DateTime.MinValue;
                 _watcher.Changed += (s, e) =>
                 {
+                    if (DateTime.UtcNow.Ticks < Interlocked.Read(ref _suppressWatchUntilTicks)) return;
+
                     // Editors write in bursts; debounce so we reload once.
                     if ((DateTime.UtcNow - last).TotalMilliseconds < 500) return;
                     last = DateTime.UtcNow;
                     Thread.Sleep(200);
 
-                    string err;
-                    var fresh = DaemonConfig.Load(path, out err);
-                    if (fresh == null)
-                    {
-                        Log.Warn("config_reload_failed", err ?? "unknown; keeping previous config");
-                        return;
-                    }
-                    lock (_cfgGate) _cfg = fresh;
-                    Log.Level = fresh.ParsedLogLevel();
-                    _renderer.SyncDevices();
-                    Log.Info("config_reloaded", path);
+                    if (!ReloadConfig(path, "file changed")) return;
+
+                    if (_styles.Dirty)
+                        Log.Warn("config_reloaded_with_pending",
+                            "config changed on disk while unsaved style edits are live; keeping the edits");
                 };
             }
             catch (Exception ex) { Log.Exception("config_watch_failed", ex); }

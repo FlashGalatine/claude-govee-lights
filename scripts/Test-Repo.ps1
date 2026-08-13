@@ -228,6 +228,45 @@ if (Test-Path $programCs) {
     }
 } else { No 'Program.cs exists' $programCs }
 
+# ------------------------------------------------- save reload wiring
+Section 'Save reloads the config'
+# A cross-file wiring gap that no single-file review can see, and that fails silently in
+# both directions: after a successful /govee save the daemon must re-read config.json.
+# StyleRoutes mutes the watcher for its own write, and a suppressed FileSystemWatcher
+# event is DROPPED, not queued - so without an explicit reload callback nothing ever
+# reassigns _cfg. The saved style stops rendering the moment pending is cleared, and the
+# next save recomputes its merge from the stale config and erases what this one wrote,
+# reporting success both times.
+#
+# Asserted from both sides: StyleRoutes must call the callback, and Program must pass one
+# that actually reloads. Either half alone is satisfied by wiring that does nothing.
+$stylesCs = Join-Path $root 'src/GoveeLights.Daemon/StyleRoutes.cs'
+if ((Test-Path $stylesCs) -and (Test-Path $programCs)) {
+    $sr = Get-Content $stylesCs -Raw
+    if ($sr -match '_afterSaved\(\)') {
+        Ok 'StyleRoutes.Save invokes its post-save reload callback'
+    } else {
+        No 'StyleRoutes.Save never invokes a post-save reload callback' `
+           'A saved style would stop rendering, and the next save would overwrite this one.'
+    }
+
+    # The Init call spans lines, so match the whole argument list up to its ');'.
+    $init = [regex]::Match($ps, '(?s)StyleRoutes\.Init\((.*?)\);')
+    if ($init.Success -and $init.Groups[1].Value -match 'ReloadConfig') {
+        Ok 'Program passes a config reload into StyleRoutes.Init'
+    } else {
+        No 'Program does not pass a config reload into StyleRoutes.Init' `
+           'The daemon would keep rendering - and saving from - the config it had before the write.'
+    }
+
+    if ($ps -match '(?s)static bool ReloadConfig\(.*?lock \(_cfgGate\) _cfg = fresh;') {
+        Ok 'ReloadConfig re-reads from disk and installs it as the live config'
+    } else {
+        No 'ReloadConfig does not install a freshly loaded config under _cfgGate' `
+           'Reloading without assigning _cfg leaves memory and disk disagreeing.'
+    }
+} else { No 'StyleRoutes.cs and Program.cs both exist' "$stylesCs / $programCs" }
+
 # ------------------------------------------------------- effects engine
 Section 'Effects engine'
 # Effects is pure and deterministic, so CI can assert on real render output with no
@@ -642,12 +681,415 @@ if (-not $exe) {
     $spMidIdx = [int]($spBlend.Count / 2)
     if ($spBlend[$spMidIdx] -ne $spPure[$spMidIdx]) { Ok 'spatial blend midpoint is not simply the incoming frame' }
     else { No 'spatial blend midpoint equals the pure incoming frame' 'Blend may be returning b outright for segment arrays.' }
+
+    # ---- pending layer -----------------------------------------------------
+    # The layer /govee set writes into. It must beat the config file, lose to a
+    # device's own override, and its tombstone must drop the config layer entirely.
+    function Get-ResolvedRow {
+        param([string[]] $ExtraArgs, [string] $State)
+        $lines = Invoke-Dump (@('--resolve-states') + $ExtraArgs)
+        $row = @($lines | Where-Object { $_ -like "$State,*" })
+        if ($row.Count -ne 1) { return $null }
+        $f = $row[0].Split(',')
+        return @{ effect = $f[1]; color = $f[2]; hz = $f[4] }
+    }
+
+    $pl = Join-Path $root 'tests/fixtures/pending-layers.json'
+
+    $base = Get-ResolvedRow @('--config', $pl) 'Thinking'
+    if ($base -and $base.color -eq '#111111' -and $base.hz -eq '0.4') {
+        Ok 'config States resolves when nothing is pending' "$($base.color) @ $($base.hz)Hz"
+    } else { No 'config States did not resolve' ($base | Out-String) }
+
+    # Pending beats the file. Colour changes, and Hz is NOT restated in the patch -
+    # so if pending replaced the layer wholesale instead of merging, Hz would revert.
+    $ov = Get-ResolvedRow @('--config', $pl, '--pending', '{"Thinking":{"Color":"#222222"}}') 'Thinking'
+    if ($ov -and $ov.color -eq '#222222' -and $ov.hz -eq '0.4') {
+        Ok 'pending beats config and merges field-wise' "$($ov.color) @ $($ov.hz)Hz"
+    } else { No 'pending layer wrong' ($ov | Out-String) }
+
+    # A device override still wins over pending.
+    $dv = Get-ResolvedRow @('--config', $pl, '--device', 'CeilingStrip',
+                            '--pending', '{"Thinking":{"Color":"#222222"}}') 'Thinking'
+    if ($dv -and $dv.color -eq '#333333') { Ok 'device override still beats pending' $dv.color }
+    else { No 'pending wrongly beat the device layer' ($dv | Out-String) }
+
+    # Tombstone drops the config layer back to the built-in default (#7B4DFF).
+    $tb = Get-ResolvedRow @('--config', $pl, '--pending', '{"Thinking":null}') 'Thinking'
+    if ($tb -and $tb.color -eq '#7B4DFF' -and $tb.hz -eq '0.6') {
+        Ok 'tombstone falls back to the built-in default' "$($tb.color) @ $($tb.hz)Hz"
+    } else { No 'tombstone did not clear the config layer' ($tb | Out-String) }
+
+    # Reset then set must land on built-in-plus-patch, not config-plus-patch. This is
+    # the defect review caught: Set used to overwrite a tombstone stored as a null
+    # dictionary value, so a patch after a reset silently resurrected the config entry
+    # the reset was meant to suppress. --cleared runs Reset before --pending is applied,
+    # since --pending alone cannot express that ordering.
+    $rs = Get-ResolvedRow @('--config', $pl, '--cleared', 'Thinking',
+                            '--pending', '{"Thinking":{"Hz":2}}') 'Thinking'
+    if ($rs -and $rs.color -eq '#7B4DFF' -and $rs.hz -eq '2') {
+        Ok 'reset then set lands on built-in-plus-patch, not config-plus-patch' "$($rs.color) @ $($rs.hz)Hz"
+    } else { No 'reset then set resurrected the config layer' ($rs | Out-String) }
+
+    # ---- known-value export ------------------------------------------------
+    $knownDump = @(Invoke-Dump @('--list-known'))
+    $effectsLine = @($knownDump | Where-Object { $_ -like 'effects,*' })
+    if ($effectsLine.Count -eq 1 -and ($effectsLine[0].Split(',').Count - 1) -eq 10) {
+        Ok '--list-known reports all ten effects'
+    } else { No '--list-known effect list wrong' ($effectsLine -join ' ') }
+
+    # ---- config splicer ----------------------------------------------------
+    # This is the code that rewrites the user's config file. Each fixture is a way
+    # a naive substring replace would corrupt it.
+    function Invoke-Splice {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        return (Invoke-Dump @('--splice-states', '--config', $p, '--states', $StatesJson)) -join "`n"
+    }
+
+    # For fixtures that must be refused rather than spliced: Invoke-Dump only surfaces
+    # stdout, which is exactly empty on a refusal, so this captures exit code and stderr
+    # too - a refusal that isn't observably different from success is not a refusal.
+    function Invoke-SpliceExpectFailure {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        $tmpOut = [System.IO.Path]::GetTempFileName()
+        $tmpErr = [System.IO.Path]::GetTempFileName()
+        try {
+            $cmdLine = ((@('--dump-frames', '--splice-states', '--config', $p, '--states', $StatesJson)) |
+                        ForEach-Object { Quote-DumpArg $_ }) -join ' '
+            $proc = Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait -PassThru `
+                -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+            return [PSCustomObject]@{
+                ExitCode = $proc.ExitCode
+                StdOut   = (Get-Content $tmpOut -Raw)
+                StdErr   = (Get-Content $tmpErr -Raw)
+            }
+        } finally { Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
+    }
+
+    # Routes --splice-states through ConfigWriter.TrySave (via --out) against a scratch
+    # copy, instead of the dry-run TrySpliceStates-only path every check above uses. Only
+    # this path exercises TrySave's own round-trip guard, atomic replace, and its use of
+    # the target file's own indentation.
+    function Invoke-SpliceToFile {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        $outPath = Join-Path ([System.IO.Path]::GetTempPath()) ("splice-out-" + [Guid]::NewGuid().ToString("N") + ".json")
+        try {
+            $lines = Invoke-Dump @('--splice-states', '--config', $p, '--states', $StatesJson, '--out', $outPath)
+            return ($lines -join "`n")
+        } finally { Remove-Item $outPath -ErrorAction SilentlyContinue }
+    }
+
+    $newStates = '{"Thinking":{"Color":"#ABCDEF"}}'
+
+    $r = Invoke-Splice 'splice-comments.json' $newStates
+    # Match the closing quote too: "KEEP ME TOO" contains "KEEP ME" as a substring, so an
+    # unquoted match would pass even if the leading comment were deleted outright.
+    if ($r -match '"KEEP ME"' -and $r -match 'KEEP ME TOO' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice preserves comments either side of States'
+    } else { No 'splice lost a comment or missed the block' $r }
+
+    $r = Invoke-Splice 'splice-examples.json' $newStates
+    if ($r -match 'recipe_scanner' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice leaves _examples_states alone'
+    } else { No 'splice damaged _examples_states' $r }
+
+    # The device's own States block must survive untouched - it is a different key
+    # at a deeper level, and matching it would silently move a per-device override.
+    $r = Invoke-Splice 'splice-devicestates.json' $newStates
+    if ($r -match '"Effect":\s*"solid"' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice does not touch Devices[].States'
+    } else { No 'splice hit a device States block' $r }
+
+    # No States key at all: one must be inserted, and the file must stay valid JSON.
+    $r = Invoke-Splice 'splice-nostates.json' $newStates
+    $parsed2 = $null
+    try { $parsed2 = $r | ConvertFrom-Json } catch { }
+    if ($parsed2 -and $parsed2.States.Thinking.Color -eq '#ABCDEF' -and $parsed2.RestColor -eq '#FFD9A0') {
+        Ok 'splice inserts a States block when none exists'
+    } else { No 'splice failed to insert States' $r }
+
+    # A string VALUE containing the text "States": must not be mistaken for the key. The
+    # fixture's comment carries an odd number of escaped quotes before the trap, so
+    # deleting the scanner's esc handling flips its inStr parity right where the fake key
+    # sits - "notmatch #111111" is what tells "replaced in place" apart from "old block
+    # left, new one inserted elsewhere", which the other three checks alone would miss.
+    $r = Invoke-Splice 'splice-stringtrap.json' $newStates
+    $parsed3 = $null
+    try { $parsed3 = $r | ConvertFrom-Json } catch { }
+    if ($parsed3 -and $parsed3.States.Thinking.Color -eq '#ABCDEF' -and $r -notmatch '#111111' -and
+        $parsed3._comment -match 'must not be spliced') {
+        Ok 'splice ignores a "States": inside a string value'
+    } else { No 'splice was fooled by a string literal' $r }
+
+    # Every spliced result must still be valid JSON - the round-trip guard in TrySave
+    # depends on this being true of TrySpliceStates output.
+    $allValid = $true
+    foreach ($f in 'splice-comments.json','splice-examples.json','splice-devicestates.json',
+                   'splice-nostates.json','splice-stringtrap.json') {
+        try { (Invoke-Splice $f $newStates) | ConvertFrom-Json | Out-Null } catch { $allValid = $false }
+    }
+    if ($allValid) { Ok 'every spliced fixture is valid JSON' } else { No 'a spliced fixture is not valid JSON' }
+
+    # A depth-1 "States" whose value is not an object (null, here) is not "no key" - that
+    # would make TrySpliceStates append a second "States" member, which
+    # JavaScriptSerializer resolves by silently keeping one and discarding the other. It
+    # must refuse instead: no stdout, a non-zero exit, and an error naming what it found.
+    $nullRes = Invoke-SpliceExpectFailure 'splice-nullstates.json' $newStates
+    if ($nullRes.ExitCode -ne 0 -and [string]::IsNullOrEmpty($nullRes.StdOut) -and
+        $nullRes.StdErr -match 'States' -and $nullRes.StdErr -match 'null') {
+        Ok 'splice refuses a top-level "States": null rather than inserting a duplicate key'
+    } else { No 'splice mishandled "States": null' ($nullRes | Out-String) }
+
+    # ---- TrySave, exercised for real -----------------------------------------
+    # Every check above only drives TrySpliceStates/RenderStates through the dry-run
+    # path. Nothing yet has ever called TrySave, so its round-trip guard, its atomic
+    # replace, and its use of the target file's own indentation (hardcoded to 2 above)
+    # are guarded by nothing that runs. --out closes that.
+    $rOut = Invoke-SpliceToFile 'splice-comments.json' $newStates
+    if ($rOut -match '"KEEP ME"' -and $rOut -match 'KEEP ME TOO' -and $rOut -match '#ABCDEF' -and $rOut -notmatch '#111111') {
+        Ok 'TrySave round-trips through --out and preserves comments'
+    } else { No 'TrySave via --out lost a comment or missed the block' $rOut }
+
+    # The indent must come from the target file, not from a constant. The fixture puts its
+    # depth-1 keys at 4 spaces, so TrySave picks up indent=4 and RenderStates lays entries
+    # out at indent+2 = 6. The dry-run path above hardcodes indent=2, which would put them
+    # at 4 - so this exact column is what separates "read the file" from "assumed 2", and
+    # it is deliberately NOT the fixture's own 8-space depth-2 column: RenderStates uses
+    # its own +2 convention rather than reproducing the file's nesting step.
+    $rIndent = Invoke-SpliceToFile 'splice-indent4.json' $newStates
+    if ($rIndent -match '(?m)^      "Thinking":' -and $rIndent -match '#ABCDEF' -and $rIndent -notmatch '#111111') {
+        Ok 'TrySave derives its indent from the target file rather than a hardcoded 2'
+    } else { No 'TrySave via --out did not derive the indent from the file' $rIndent }
+
+    # ---- Merged() coverage gap ----------------------------------------------
+    # StyleStore.Merged is what save actually feeds RenderStates, and it had no direct
+    # test: only the resolve-through-Palette path was exercised. A state that is
+    # cleared AND patched is the case that most needs proving, because a dictionary
+    # keyed by a nullable patch could not represent it at all (see StyleStore's own
+    # comment) - Merged must drop the config entry outright and merge the patch onto
+    # nothing, not onto what it just dropped. --cleared runs Reset before --states is
+    # applied as patches (mirrors --resolve-states' --pending/--cleared shape), and
+    # --splice-states writes store.Merged(cfg) instead of --states verbatim once
+    # --cleared is present.
+    $pl = Join-Path $root 'tests/fixtures/pending-layers.json'
+    $rCleared = (Invoke-Dump @('--splice-states', '--config', $pl, '--cleared', 'Thinking',
+                               '--states', '{"Thinking":{"Hz":2}}')) -join "`n"
+    $parsed4 = $null
+    try { $parsed4 = $rCleared | ConvertFrom-Json } catch { }
+    if ($parsed4 -and $parsed4.States.Thinking.Hz -eq 2 -and
+        (-not (Get-Member -InputObject $parsed4.States.Thinking -Name 'Color' -ErrorAction SilentlyContinue))) {
+        Ok 'Merged() emits the patch alone for a cleared-then-patched state, no config fields leak in'
+    } else { No 'Merged() leaked a config field into a cleared-then-patched state' $rCleared }
+
+    # ---- themes ------------------------------------------------------------
+    # A theme is a complete palette: applying one must not leave residue from the
+    # last, so every built-in has to name every state.
+    #
+    # Every theme-touching call below passes --themes-dir pointed at a scratch
+    # directory, not the live %LOCALAPPDATA% themes folder --list-themes/--save-theme
+    # touch by default. That folder belongs to whatever the daemon has installed on
+    # the machine running this suite - without isolation, a leftover user theme there
+    # (or one this very test saves) could shadow a built-in and make a perfectly good
+    # built-in look broken, which is exactly the bug under test in the shadow checks
+    # below, deliberately, in a directory nothing else can see.
+    $themesScratch = Join-Path ([System.IO.Path]::GetTempPath()) ("govee-themes-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $themesScratch -Force | Out-Null
+    try {
+        $themeRows = @(Invoke-Dump @('--list-themes', '--themes-dir', $themesScratch) | Where-Object { $_ -and $_ -notlike 'name,*' })
+        $stateCount = (@(Invoke-Dump @('--resolve-states')) | Where-Object { $_ -and $_ -notlike 'state,*' }).Count
+
+        $builtins = @($themeRows | Where-Object { $_.Split(',')[1] -eq 'yes' })
+        if ($builtins.Count -ge 4) { Ok "built-in themes present ($($builtins.Count))" }
+        else { No 'expected at least four built-in themes' ($builtins -join '; ') }
+
+        # "complete" (column 5) is Themes.IsComplete: the theme's own State *names*
+        # compared against the real Activity set, not a bare count. A theme with
+        # fourteen keys and one misspelled (ToolShel instead of ToolShell) has the
+        # right count and the wrong set - that state would silently fall back to the
+        # built-in default, and a count-only check cannot see it.
+        $incomplete = @($builtins | Where-Object { $_.Split(',')[5] -ne 'yes' })
+        if ($incomplete.Count -eq 0) { Ok "every built-in theme names exactly the $stateCount Activity states" }
+        else { No 'a built-in theme is missing or misnames a state' ($incomplete -join '; ') }
+
+        # Palette.Norm always resolves to a *known* effect (it falls back to a default
+        # rather than ever emitting a value it doesn't recognise), so a typo in a
+        # theme's raw Effect field can never show up in --resolve-states' resolved CSV
+        # - checking that column would pass even with a bogus effect baked into a
+        # shipped theme. What the typo DOES do is trip Palette's WarnOnce, and
+        # --dump-frames routes that straight to stderr (Log.AlsoConsole/ConsoleToStderr,
+        # set for the whole dump mode). That is the only place a themed typo is
+        # observable - but absence of the warning only means something once the run is
+        # confirmed to have actually resolved every state. Without the exit-code and
+        # row-count gate, a deleted --theme flag, a TryLoad that started failing, or the
+        # process dying early would all leave stderr just as silent as a clean theme
+        # does, and this would report PASS for a --theme path that never ran at all -
+        # and nothing else in this suite drives --theme, so nothing else would catch it.
+        function Invoke-DumpCapture {
+            param([string[]] $DumpArgs)
+            $tmpOut = [System.IO.Path]::GetTempFileName()
+            $tmpErr = [System.IO.Path]::GetTempFileName()
+            try {
+                $cmdLine = ((@('--dump-frames') + $DumpArgs) | ForEach-Object { Quote-DumpArg $_ }) -join ' '
+                $proc = Start-Process -FilePath $exe -ArgumentList $cmdLine -NoNewWindow -Wait -PassThru `
+                    -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+                return [PSCustomObject]@{
+                    ExitCode = $proc.ExitCode
+                    StdOut   = @(Get-Content $tmpOut)
+                    StdErr   = (Get-Content $tmpErr -Raw)
+                }
+            } finally { Remove-Item -LiteralPath $tmpOut, $tmpErr -ErrorAction SilentlyContinue }
+        }
+        $themeEffectsBad = @()
+        foreach ($t in @('default','muted','vivid','mono')) {
+            $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $t, '--themes-dir', $themesScratch)
+            $rows = @($cap.StdOut | Where-Object { $_ -and $_ -notlike 'state,*' })
+            if ($cap.ExitCode -ne 0 -or $rows.Count -ne $stateCount) {
+                $themeEffectsBad += "$t (did not resolve: exit=$($cap.ExitCode) rows=$($rows.Count))"
+            } elseif ($cap.StdErr -match '"evt":"style_unknown_value"' -and $cap.StdErr -match '"field":"Effect"') {
+                $themeEffectsBad += $t
+            }
+        }
+        if ($themeEffectsBad.Count -eq 0) { Ok 'every built-in theme names only known effects' }
+        else { No 'a built-in theme names an unknown effect (or --theme failed to resolve)' ($themeEffectsBad -join ', ') }
+
+        # A theme name becomes a filename - IsValidName is a path guard, not cosmetics.
+        # A single case like ../evil only proves the guard blocks slash-based
+        # traversal; a regex weakened to reject nothing but slashes would still pass
+        # that one check. Cover the other ways a "sanitise later" guard tends to leak:
+        # a bare "..", a backslash form, a drive-relative name, a Windows reserved
+        # device name, and .NET's own "$ matches before a trailing newline" surprise
+        # (why the fix uses \A...\z instead of ^...$).
+        $badNames = @('..', '..\evil', 'a\b', 'C:foo', 'CON', "mono`n")
+        $accepted = @()
+        foreach ($n in $badNames) {
+            $r = @(Invoke-Dump @('--check-theme-name', $n)) -join ''
+            if ($r -notmatch 'invalid') { $accepted += $n }
+        }
+        if ($accepted.Count -eq 0) { Ok 'theme name validation rejects traversal, device names, and the trailing-newline edge case' }
+        else { No 'theme name validation accepted a name it should have refused' ($accepted -join ', ') }
+
+        # ---- user themes: TrySave and TryLoad's file branch, otherwise untouched ----
+        # Nothing above ever calls TrySave, or exercises TryLoad's File.Exists branch -
+        # every theme read so far has come from BuiltIn(). Round-trip a fresh name
+        # through --save-theme and back through --resolve-states --theme to prove a
+        # theme actually gets written to disk and actually gets read back correctly.
+        $rtStates = '{"Thinking":{"Color":"#0A0B0C","Effect":"pulse"}}'
+        $saveOut = Invoke-Dump @('--save-theme', 'roundtrip-check', '--states', $rtStates, '--themes-dir', $themesScratch)
+        $rtRow = @(Invoke-Dump @('--resolve-states', '--theme', 'roundtrip-check', '--themes-dir', $themesScratch) |
+                   Where-Object { $_ -like 'Thinking,*' })
+        if (($saveOut -join '') -match 'saved' -and $rtRow -and $rtRow[0].Split(',')[1] -eq 'pulse' -and
+            $rtRow[0].Split(',')[2] -eq '#0A0B0C') {
+            Ok 'a saved user theme round-trips through TrySave and TryLoad'
+        } else { No 'a saved user theme did not round-trip' ("save=$saveOut resolve=$rtRow") }
+
+        # ---- shadowing: both the list path and the load path ------------------------
+        # A user theme named after a built-in must win on load (TryLoad's file branch
+        # is checked before the BuiltIn() fallback) and must be visible as such on the
+        # list: List() marks the built-in row Shadowed, ListThemes must actually print
+        # that flag, and the built-in row's own state count must not be the user file's
+        # count in disguise - that swap is exactly the bug the review caught, where a
+        # three-state user "mono" made the built-in "mono" row report three states.
+        $shadowStates = '{"Idle":{"Color":"#123456"}}'
+        Invoke-Dump @('--save-theme', 'mono', '--states', $shadowStates, '--themes-dir', $themesScratch) | Out-Null
+        $shadowRows = @(Invoke-Dump @('--list-themes', '--themes-dir', $themesScratch) | Where-Object { $_ -like 'mono,*' })
+        $builtinMono = $shadowRows | Where-Object { $_.Split(',')[1] -eq 'yes' }
+        $userMono    = $shadowRows | Where-Object { $_.Split(',')[1] -eq 'no' }
+        if ($shadowRows.Count -eq 2 -and $builtinMono -and $userMono -and
+            $builtinMono.Split(',')[4] -eq 'yes' -and $builtinMono.Split(',')[2] -eq "$stateCount" -and
+            $userMono.Split(',')[2] -eq '1') {
+            Ok '--list-themes marks a shadowed built-in without leaking the user theme''s state count onto it'
+        } else { No '--list-themes mishandled a shadowed built-in' ($shadowRows -join '; ') }
+
+        $shadowLoadRow = @(Invoke-Dump @('--resolve-states', '--theme', 'mono', '--themes-dir', $themesScratch) |
+                            Where-Object { $_ -like 'Idle,*' })
+        if ($shadowLoadRow -and $shadowLoadRow[0].Split(',')[2] -eq '#123456') {
+            Ok 'a user theme shadows a same-named built-in on the load path'
+        } else { No 'a user theme did not shadow a same-named built-in on load' ($shadowLoadRow -join '; ') }
+    } finally {
+        Remove-Item -LiteralPath $themesScratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
+
+# Documented verbs must exist in the CLI, or the README teaches commands that fail.
+# A pure text check against Govee-Cli.ps1 - needs no build, so it runs unconditionally
+# rather than inside the $exe-gated block above, and still catches drift on the
+# documented no-build SKIP path.
+#
+# The verb list is READ FROM THE README, not restated here. A hardcoded list only ever
+# proves that the seven names in this file exist in that file: documenting a new verb
+# without implementing it - the exact drift the check is named for - left it green.
+Section 'Documented verbs'
+$cliText = Get-Content (Join-Path $root 'scripts/Govee-Cli.ps1') -Raw
+$readmeText = Get-Content (Join-Path $root 'README.md') -Raw
+
+# The Commands section is a fenced block of "/govee <verb>   description" lines, which
+# is a stable enough shape to parse: one verb per line, always the first token after
+# "/govee", with alternatives written as "on|off". Anything else on the line (an
+# argument placeholder like "<s>", the description) is ignored.
+$cmdBlock = [regex]::Match($readmeText, '(?ms)^##[ \t]+Commands[ \t]*(?:\r?\n)+```[ \t]*\r?\n(.*?)^```')
+$documentedVerbs = @()
+if ($cmdBlock.Success) {
+    foreach ($line in ($cmdBlock.Groups[1].Value -split '\r?\n')) {
+        $m = [regex]::Match($line, '^\s*/govee\s+([A-Za-z][A-Za-z0-9|]*)')
+        if (-not $m.Success) { continue }
+        foreach ($v in $m.Groups[1].Value.Split('|')) {
+            if ($v) { $documentedVerbs += $v.ToLowerInvariant() }
+        }
+    }
+}
+$documentedVerbs = @($documentedVerbs | Sort-Object -Unique)
+
+if (-not $cmdBlock.Success) {
+    No 'README.md has a fenced Commands block' `
+       'The documented-verb check reads its verbs from there; without it nothing guards doc/CLI drift.'
+} else {
+    Ok "README Commands section lists $($documentedVerbs.Count) verbs" ($documentedVerbs -join ', ')
+}
+
+# Guard the section itself against regression. Extraction that quietly stopped finding
+# anything would leave the loop below iterating over an empty list and passing - and the
+# control-plane verbs are the ones this branch added, so silently dropping one from the
+# docs is a real regression in its own right.
+$mustBeDocumented = @('styles','set','reset','save','revert','preview','theme')
+$undocumented = @($mustBeDocumented | Where-Object { $documentedVerbs -notcontains $_ })
+if ($undocumented.Count -eq 0) { Ok 'README documents every control-plane verb' }
+else { No 'a control-plane verb is missing from the README Commands section' ($undocumented -join ', ') }
+
+# Matched at exactly 4 leading spaces: the top-level `switch ($Command)` cases (e.g.
+# `    'save' {`) sit at that indent, while the nested `theme` sub-switch's own
+# `'save' {` case sits three levels deeper at 12 spaces. `save` is the only verb name
+# that collides between the two switches - matching any leading whitespace would let
+# the nested case stand in for the top-level one and pass even if the real `save`
+# verb were deleted.
+#
+# Two case shapes count, both at that same indent: a plain `'status' {`, and the
+# multi-value condition form `{ $_ -in 'on', 'enable' } {` that `on` and `off` use.
+$missingVerbs = @()
+foreach ($v in $documentedVerbs) {
+    $q = [regex]::Escape($v)
+    $plain = '(?m)^    ' + "'$q'" + '\s*\{'
+    $multi = '(?m)^    \{[^}\r\n]*' + "'$q'" + '[^}\r\n]*\}\s*\{'
+    if ($cliText -notmatch $plain -and $cliText -notmatch $multi) { $missingVerbs += $v }
+}
+if ($missingVerbs.Count -eq 0) { Ok 'every documented verb exists in the CLI' }
+else { No 'a documented verb is missing from the CLI' ($missingVerbs -join ', ') }
 
 # Shipping an example config that names an effect the engine does not implement
 # would render as solid, only warning once per distinct value in the daemon log
 # rather than failing loudly, so this check catches it before it ships.
-$known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+#
+# $effectsLine is only assigned inside the Effects-engine block above, guarded by
+# whether a build was found; in the documented no-build SKIP path it stays unset, so
+# indexing into it here would throw and cascade into every effect below reading as
+# unknown. Fall back to the engine's known list, stated once, when that happens.
+if ($effectsLine -and $effectsLine.Count -eq 1) {
+    $known = @($effectsLine[0].Split(',') | Select-Object -Skip 1)
+} else {
+    $known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+}
 if ($parsed['config/config.example.json']) {
     $badEffects = @()
     # Both the live States block and the _examples_states showcase, since a broken
