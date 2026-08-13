@@ -698,6 +698,80 @@ if (-not $exe) {
     if ($effectsLine.Count -eq 1 -and ($effectsLine[0].Split(',').Count - 1) -eq 10) {
         Ok '--list-known reports all ten effects'
     } else { No '--list-known effect list wrong' ($effectsLine -join ' ') }
+
+    # ---- config splicer ----------------------------------------------------
+    # This is the code that rewrites the user's config file. Each fixture is a way
+    # a naive substring replace would corrupt it.
+    function Invoke-Splice {
+        param([string] $Fixture, [string] $StatesJson)
+        $p = Join-Path $root "tests/fixtures/$Fixture"
+        return (Invoke-Dump @('--splice-states', '--config', $p, '--states', $StatesJson)) -join "`n"
+    }
+
+    $newStates = '{"Thinking":{"Color":"#ABCDEF"}}'
+
+    $r = Invoke-Splice 'splice-comments.json' $newStates
+    if ($r -match 'KEEP ME' -and $r -match 'KEEP ME TOO' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice preserves comments either side of States'
+    } else { No 'splice lost a comment or missed the block' $r }
+
+    $r = Invoke-Splice 'splice-examples.json' $newStates
+    if ($r -match 'recipe_scanner' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice leaves _examples_states alone'
+    } else { No 'splice damaged _examples_states' $r }
+
+    # The device's own States block must survive untouched - it is a different key
+    # at a deeper level, and matching it would silently move a per-device override.
+    $r = Invoke-Splice 'splice-devicestates.json' $newStates
+    if ($r -match '"Effect":\s*"solid"' -and $r -match '#ABCDEF' -and $r -notmatch '#111111') {
+        Ok 'splice does not touch Devices[].States'
+    } else { No 'splice hit a device States block' $r }
+
+    # No States key at all: one must be inserted, and the file must stay valid JSON.
+    $r = Invoke-Splice 'splice-nostates.json' $newStates
+    $parsed2 = $null
+    try { $parsed2 = $r | ConvertFrom-Json } catch { }
+    if ($parsed2 -and $parsed2.States.Thinking.Color -eq '#ABCDEF' -and $parsed2.RestColor -eq '#FFD9A0') {
+        Ok 'splice inserts a States block when none exists'
+    } else { No 'splice failed to insert States' $r }
+
+    # A string VALUE containing the text "States": must not be mistaken for the key.
+    $r = Invoke-Splice 'splice-stringtrap.json' $newStates
+    $parsed3 = $null
+    try { $parsed3 = $r | ConvertFrom-Json } catch { }
+    if ($parsed3 -and $parsed3.States.Thinking.Color -eq '#ABCDEF' -and
+        $parsed3._comment -match 'must not be spliced') {
+        Ok 'splice ignores a "States": inside a string value'
+    } else { No 'splice was fooled by a string literal' $r }
+
+    # Every spliced result must still be valid JSON - the round-trip guard in TrySave
+    # depends on this being true of TrySpliceStates output.
+    $allValid = $true
+    foreach ($f in 'splice-comments.json','splice-examples.json','splice-devicestates.json',
+                   'splice-nostates.json','splice-stringtrap.json') {
+        try { (Invoke-Splice $f $newStates) | ConvertFrom-Json | Out-Null } catch { $allValid = $false }
+    }
+    if ($allValid) { Ok 'every spliced fixture is valid JSON' } else { No 'a spliced fixture is not valid JSON' }
+
+    # ---- Merged() coverage gap ----------------------------------------------
+    # StyleStore.Merged is what save actually feeds RenderStates, and it had no direct
+    # test: only the resolve-through-Palette path was exercised. A state that is
+    # cleared AND patched is the case that most needs proving, because a dictionary
+    # keyed by a nullable patch could not represent it at all (see StyleStore's own
+    # comment) - Merged must drop the config entry outright and merge the patch onto
+    # nothing, not onto what it just dropped. --cleared runs Reset before --states is
+    # applied as patches (mirrors --resolve-states' --pending/--cleared shape), and
+    # --splice-states writes store.Merged(cfg) instead of --states verbatim once
+    # --cleared is present.
+    $pl = Join-Path $root 'tests/fixtures/pending-layers.json'
+    $rCleared = (Invoke-Dump @('--splice-states', '--config', $pl, '--cleared', 'Thinking',
+                               '--states', '{"Thinking":{"Hz":2}}')) -join "`n"
+    $parsed4 = $null
+    try { $parsed4 = $rCleared | ConvertFrom-Json } catch { }
+    if ($parsed4 -and $parsed4.States.Thinking.Hz -eq 2 -and
+        (-not (Get-Member -InputObject $parsed4.States.Thinking -Name 'Color' -ErrorAction SilentlyContinue))) {
+        Ok 'Merged() emits the patch alone for a cleared-then-patched state, no config fields leak in'
+    } else { No 'Merged() leaked a config field into a cleared-then-patched state' $rCleared }
 }
 
 # Shipping an example config that names an effect the engine does not implement

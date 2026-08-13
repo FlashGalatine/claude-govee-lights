@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Web.Script.Serialization;
 
@@ -29,6 +30,7 @@ namespace GoveeLights
 
             if (HasFlag(args, "--list-known")) return ListKnown();
             if (HasFlag(args, "--resolve-states")) return ResolveStates(args);
+            if (HasFlag(args, "--splice-states")) return SpliceStates(args);
 
             var segments = ArgInt(args, "--segments", 10);
             var seconds  = ArgDouble(args, "--seconds", 2.0);
@@ -223,6 +225,68 @@ namespace GoveeLights
                 }));
             }
             w.Flush();
+            return 0;
+        }
+
+        /// <summary>Print the spliced config to stdout without writing anything, so the
+        /// riskiest code in the daemon is testable against hostile fixtures.
+        ///
+        /// --states is normally the literal States map to write, verbatim. But when
+        /// --cleared is also given (same comma-separated shape --resolve-states takes),
+        /// --states is instead read as patches: each is applied through a StyleStore
+        /// alongside the clears, and what gets spliced in is store.Merged(cfg). That is
+        /// the only way to exercise "cleared and also patched" end-to-end - Merged is
+        /// what save actually feeds RenderStates, and TrySpliceStates alone cannot express
+        /// "drop the config entry, then merge a patch onto nothing" the way Merged does.</summary>
+        static int SpliceStates(string[] args)
+        {
+            var configPath = Arg(args, "--config", null);
+            if (string.IsNullOrEmpty(configPath)) { Console.Error.WriteLine("--splice-states needs --config"); return 2; }
+            if (!File.Exists(configPath)) { Console.Error.WriteLine("no such config: " + configPath); return 2; }
+
+            var statesJson = Arg(args, "--states", null);
+            if (string.IsNullOrEmpty(statesJson)) { Console.Error.WriteLine("--splice-states needs --states"); return 2; }
+
+            Dictionary<string, StateStyle> parsed;
+            try { parsed = new JavaScriptSerializer().Deserialize<Dictionary<string, StateStyle>>(statesJson); }
+            catch (Exception ex) { Console.Error.WriteLine("bad --states: " + ex.Message); return 2; }
+            if (parsed == null) parsed = new Dictionary<string, StateStyle>();
+
+            Dictionary<string, StateStyle> states;
+            var clearedArg = Arg(args, "--cleared", null);
+            if (!string.IsNullOrEmpty(clearedArg))
+            {
+                string e;
+                var cfg = DaemonConfig.Load(configPath, out e);
+                if (cfg == null) { Console.Error.WriteLine("bad --config: " + e); return 2; }
+
+                var store = new StyleStore();
+                foreach (var name in clearedArg.Split(','))
+                {
+                    var trimmed = name.Trim();
+                    if (trimmed.Length > 0) store.Reset(trimmed);
+                }
+                foreach (var kv in parsed)
+                {
+                    if (kv.Value == null) store.Reset(kv.Key);
+                    else store.Set(kv.Key, kv.Value);
+                }
+                states = store.Merged(cfg);
+            }
+            else
+            {
+                states = parsed;
+            }
+
+            var original = File.ReadAllText(configPath);
+            string result, error;
+            if (!ConfigWriter.TrySpliceStates(original, ConfigWriter.RenderStates(states, 2), out result, out error))
+            {
+                Console.Error.WriteLine("splice failed: " + error);
+                return 2;
+            }
+            Console.Out.Write(result);
+            Console.Out.Flush();
             return 0;
         }
 
