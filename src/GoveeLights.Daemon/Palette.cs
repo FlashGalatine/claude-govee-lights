@@ -93,7 +93,11 @@ namespace GoveeLights
 
         /// <summary>Segment-aware resolve from a config, and the only public way in that
         /// takes one. Layers, weakest first: effect defaults, state defaults, config,
-        /// device - a non-null field in a later layer wins; null means inherit.
+        /// pending, device, preview - a non-null field in a later layer wins; null means
+        /// inherit. Pending sits exactly where /govee set edits live: stronger than the
+        /// config file, weaker than a device's own override. Preview is strongest of all
+        /// and transient. See BuildLayers for how a cleared state and a pending patch
+        /// combine independently.
         ///
         /// A spatial effect has nothing to paint on a device with one zone, so on
         /// segments &lt;= 1 it re-resolves with Effect forced to "breathe" - which lets
@@ -117,16 +121,17 @@ namespace GoveeLights
             if (_stateDefaults.TryGetValue(key, out s)) layers.Add(s);
             else layers.Add(_stateDefaults["Idle"]);
 
-            // The pending layer is a shadow of cfg.States and sits exactly where it sits:
-            // stronger than the file, weaker than a device's own override. A tombstone
-            // (present, null) suppresses the file layer without adding one of its own.
-            StateStyle pend = null;
-            var hasPending = pending != null && pending.TryPending(key, out pend);
-            var tombstoned = hasPending && pend == null;
-
-            if (!tombstoned && cfg != null && cfg.States != null &&
+            // Clearing and patching are independent facts (StyleStore keeps them in
+            // separate collections): a cleared state drops the config layer regardless
+            // of whether a patch exists, and a patch applies regardless of whether the
+            // state was cleared - so "reset Thinking" then "set Thinking --hz 2" lands on
+            // built-in-plus-patch, not on the config entry the reset was meant to drop.
+            var cleared = pending != null && pending.IsCleared(key);
+            if (!cleared && cfg != null && cfg.States != null &&
                 cfg.States.TryGetValue(key, out s) && s != null) layers.Add(s);
-            if (hasPending && pend != null) layers.Add(pend);
+
+            StateStyle pend;
+            if (pending != null && pending.TryPending(key, out pend) && pend != null) layers.Add(pend);
 
             if (device != null && device.States != null &&
                 device.States.TryGetValue(key, out s) && s != null) layers.Add(s);

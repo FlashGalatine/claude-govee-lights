@@ -17,7 +17,7 @@ namespace GoveeLights
         static readonly object _cfgGate = new object();
         static GoveeClient _govee;
         static SessionStore _sessions;
-        static StyleStore _styles = new StyleStore();
+        static readonly StyleStore _styles = new StyleStore();
         static HookMapper _mapper;
         static Renderer _renderer;
         static MiniHttpServer _http;

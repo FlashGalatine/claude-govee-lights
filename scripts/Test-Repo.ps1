@@ -681,9 +681,20 @@ if (-not $exe) {
         Ok 'tombstone falls back to the built-in default' "$($tb.color) @ $($tb.hz)Hz"
     } else { No 'tombstone did not clear the config layer' ($tb | Out-String) }
 
+    # Reset then set must land on built-in-plus-patch, not config-plus-patch. This is
+    # the defect review caught: Set used to overwrite a tombstone stored as a null
+    # dictionary value, so a patch after a reset silently resurrected the config entry
+    # the reset was meant to suppress. --cleared runs Reset before --pending is applied,
+    # since --pending alone cannot express that ordering.
+    $rs = Get-ResolvedRow @('--config', $pl, '--cleared', 'Thinking',
+                            '--pending', '{"Thinking":{"Hz":2}}') 'Thinking'
+    if ($rs -and $rs.color -eq '#7B4DFF' -and $rs.hz -eq '2') {
+        Ok 'reset then set lands on built-in-plus-patch, not config-plus-patch' "$($rs.color) @ $($rs.hz)Hz"
+    } else { No 'reset then set resurrected the config layer' ($rs | Out-String) }
+
     # ---- known-value export ------------------------------------------------
-    $known = @(Invoke-Dump @('--list-known'))
-    $effectsLine = @($known | Where-Object { $_ -like 'effects,*' })
+    $knownDump = @(Invoke-Dump @('--list-known'))
+    $effectsLine = @($knownDump | Where-Object { $_ -like 'effects,*' })
     if ($effectsLine.Count -eq 1 -and ($effectsLine[0].Split(',').Count - 1) -eq 10) {
         Ok '--list-known reports all ten effects'
     } else { No '--list-known effect list wrong' ($effectsLine -join ' ') }
@@ -692,7 +703,16 @@ if (-not $exe) {
 # Shipping an example config that names an effect the engine does not implement
 # would render as solid, only warning once per distinct value in the daemon log
 # rather than failing loudly, so this check catches it before it ships.
-$known = @($effectsLine[0].Split(',') | Select-Object -Skip 1)
+#
+# $effectsLine is only assigned inside the Effects-engine block above, guarded by
+# whether a build was found; in the documented no-build SKIP path it stays unset, so
+# indexing into it here would throw and cascade into every effect below reading as
+# unknown. Fall back to the engine's known list, stated once, when that happens.
+if ($effectsLine -and $effectsLine.Count -eq 1) {
+    $known = @($effectsLine[0].Split(',') | Select-Object -Skip 1)
+} else {
+    $known = @('solid','breathe','pulse','blink','chase','comet','wipe','progress','sparkle','rainbow')
+}
 if ($parsed['config/config.example.json']) {
     $badEffects = @()
     # Both the live States block and the _examples_states showcase, since a broken

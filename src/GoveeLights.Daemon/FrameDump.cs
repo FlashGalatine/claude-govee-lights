@@ -146,7 +146,10 @@ namespace GoveeLights
 
         /// <summary>Resolve every state through the full layer stack and print it, so the
         /// merge is testable without hardware. --pending takes the same shape StyleStore
-        /// holds: state name to a partial StateStyle, or literal null for a tombstone.</summary>
+        /// holds: state name to a partial StateStyle, or literal null for a tombstone.
+        /// --cleared is a comma-separated list of states to Reset before --pending is
+        /// applied, so a reset-then-set sequence (StyleStore keeps the two independent)
+        /// is testable too - --pending alone cannot express that ordering.</summary>
         static int ResolveStates(string[] args)
         {
             var configPath = Arg(args, "--config", null);
@@ -159,6 +162,14 @@ namespace GoveeLights
             }
 
             var store = new StyleStore();
+            var clearedArg = Arg(args, "--cleared", null);
+            if (!string.IsNullOrEmpty(clearedArg))
+                foreach (var name in clearedArg.Split(','))
+                {
+                    var trimmed = name.Trim();
+                    if (trimmed.Length > 0) store.Reset(trimmed);
+                }
+
             var pendingJson = Arg(args, "--pending", null);
             if (!string.IsNullOrEmpty(pendingJson))
             {
@@ -175,8 +186,12 @@ namespace GoveeLights
 
             DeviceConfig dev = null;
             var deviceName = Arg(args, "--device", null);
-            if (cfg != null && !string.IsNullOrEmpty(deviceName))
+            if (!string.IsNullOrEmpty(deviceName))
             {
+                // Every other bad argument in this harness reports and returns 2 rather
+                // than quietly answering a different question - a --device with no
+                // --config to look it up in must not silently resolve as "no device".
+                if (cfg == null) { Console.Error.WriteLine("--device requires --config"); return 2; }
                 dev = cfg.Devices.FirstOrDefault(x => x != null &&
                           string.Equals(x.Name, deviceName, StringComparison.OrdinalIgnoreCase));
                 if (dev == null)
