@@ -65,7 +65,7 @@ public sealed class StyleStore
     public void Set(string state, StateStyle patch);    // field-wise; null means "leave"
     public void ApplyTheme(Theme t);                    // fills _pending for every state
     public void Reset(string state);                    // clear one state
-    public void ResetAll();                             // clear every state
+    public void ResetAll(DaemonConfig cfg);             // clear every state, incl. non-Activity config keys
     public void Revert();                               // discard all unsaved edits
     public bool IsCleared(string state);
     public Dictionary<string, StateStyle> Merged(DaemonConfig cfg);  // what save writes
