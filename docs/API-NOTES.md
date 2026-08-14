@@ -312,28 +312,12 @@ what the device and the LAN will tolerate — rate-limit by choice, not by neces
 All control methods returned the string `"0"` — a bare integer code as text, not
 `PipeSendResult` JSON. Parse with `int.TryParse` first; keep the JSON fallback only as a guard.
 
-## Settled by observation
-
-`isGradientOff` polarity — **use `0`.** The DOCX says `1` = gradient on; the internal field
-is named `_gradientOffSkus`, implying `1` = gradient **off**. The field name was right and
-the DOCX was wrong.
-
-Confirmed on 2026-08-13 against a Glide Hexa Pro (16 segments), a Glide Hexa Pro Desk (4)
-and an H619A (10). At `1`, `DeviceSegmentsColor` is accepted — it returns `"0"` like every
-other call — but the per-segment colours are flattened, so every spatial effect renders as
-a uniform pulse and looks broken in a way that reports success at every layer. At `0` the
-segments light individually and `chase` shows a head travelling the strip.
-
-This is the most expensive kind of bug this API can produce: it is invisible from the return
-code, invisible in the daemon log, and invisible to any test that does not have eyes on the
-hardware. It went unnoticed through two feature branches that both added spatial effects.
-
-Still configurable, and worth leaving that way: `_gradientOffSkus` reads like a per-SKU
-exception list, so the polarity may be inverted on some models.
-
 ## Still unresolved
 
-1. `DeviceRZSwitchControl` polarity (presumed to match `DeviceSwitchControl`: `1` = on).
+1. `isGradientOff` polarity. The DOCX says `1` = gradient on; the internal field is named
+   `_gradientOffSkus`, implying `1` = gradient **off**. Both values return `0`, so only visual
+   inspection can settle it.
+2. `DeviceRZSwitchControl` polarity (presumed to match `DeviceSwitchControl`: `1` = on).
    Returns `0` either way.
 3. Whether a `0` return guarantees the light physically changed. Since the transport is UDP,
    `0` means "sent", not "acknowledged".

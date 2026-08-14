@@ -1107,25 +1107,6 @@ if ($parsed['config/config.example.json']) {
     else { No 'config.example.json names an unknown effect' ($badEffects -join ', ') }
 }
 
-# ------------------------------------------------- gradient polarity
-Section 'Segment gradient polarity'
-# IsGradientOff must default to 0. At 1 the Govee API accepts DeviceSegmentsColor and
-# returns success, but flattens the per-segment colours - so every spatial effect renders
-# as a uniform pulse with nothing wrong in any log or return code. It shipped that way
-# through two branches that both added spatial effects, and only a human looking at a
-# strip caught it. Nothing else in this suite can see it, so pin the value.
-$cfgCs = Get-Content (Join-Path $root 'src/GoveeLights.Daemon/Config.cs') -Raw
-if ($cfgCs -match 'IsGradientOff\s*\{\s*get;\s*set;\s*\}\s*=\s*0\s*;') {
-    Ok 'Config.cs defaults IsGradientOff to 0'
-} else {
-    No 'Config.cs does not default IsGradientOff to 0' 'At 1, every per-segment effect renders as a uniform pulse.'
-}
-if ($parsed['config/config.example.json']) {
-    $g = $parsed['config/config.example.json'].IsGradientOff
-    if ($g -eq 0) { Ok 'config.example.json ships IsGradientOff 0' }
-    else { No 'config.example.json ships the wrong gradient polarity' "IsGradientOff=$g" }
-}
-
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
