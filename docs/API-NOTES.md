@@ -312,12 +312,36 @@ what the device and the LAN will tolerate — rate-limit by choice, not by neces
 All control methods returned the string `"0"` — a bare integer code as text, not
 `PipeSendResult` JSON. Parse with `int.TryParse` first; keep the JSON fallback only as a guard.
 
-## Still unresolved
+## Settled by observation (2026-08-13)
 
-1. `isGradientOff` polarity. The DOCX says `1` = gradient on; the internal field is named
-   `_gradientOffSkus`, implying `1` = gradient **off**. Both values return `0`, so only visual
-   inspection can settle it.
-2. `DeviceRZSwitchControl` polarity (presumed to match `DeviceSwitchControl`: `1` = on).
-   Returns `0` either way.
+Both of the polarities previously listed here as unresolved were confirmed against a
+Glide Hexa Pro (16 segments), a Glide Hexa Pro Desk (4) and an H619A (10), by driving the
+DLL directly with the daemon's renderer disabled so nothing competed for the device:
+
+| Setting | Correct value | Evidence |
+|---|---|---|
+| `isGradientOff` | **1** | At 1, an 8-red/8-white pattern renders as a visible split. At 0 the strip flattens to one averaged colour. |
+| `DeviceRZSwitchControl` | **1** = on | At 1 the split renders; at 0 the same write flattens. `DeviceSegmentsColor` silently requires this mode. |
+
+Both were already the shipped defaults. Neither is a bug — but note the failure mode, because
+it wasted an afternoon: **a wrong value here changes nothing observable except the light.**
+`DeviceSegmentsColor` returns `"0"` for an ignored write exactly as it does for an honoured
+one, so the return code, the log and every headless test agree that everything is fine.
+
+### Segment rate is not the limit; segment *speed* is
+
+Also settled: the strip absorbs ~63 segment writes/sec across three devices with no
+flattening, and an intervening `GetDeviceBaseInfo` does not disturb DreamView mode. Both were
+suspected and both were exonerated by direct test.
+
+What does break perception is **how fast the lit segment moves**. On a multi-panel array each
+segment is a physical panel with its own transition time. A chase stepping one panel per
+second is unmistakable; the same chase at the engine's default rates (~5 panels/sec on a
+16-segment device at `Hz 0.3`) never lets a panel reach full brightness, and the array
+averages into a dim wash that looks exactly like a broken spatial effect.
+
+This is a tuning property of the hardware, not a defect. On dense LED strips the defaults are
+fine. On hex panels, spatial effects want roughly `Hz 0.05`-`0.15`, and a `Depth` above 0 so
+the tail glows instead of sitting at the 2% (`#050200`) the falloff otherwise produces.
 3. Whether a `0` return guarantees the light physically changed. Since the transport is UDP,
    `0` means "sent", not "acknowledged".

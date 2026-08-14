@@ -26,6 +26,7 @@ namespace GoveeLights
             public DateTime LastKeepaliveAt = DateTime.MinValue;
             public bool RazerPrimed;
             public bool SwitchedOn;
+            public DateTime LastTraceAt = DateTime.MinValue;
         }
 
         readonly GoveeClient _govee;
@@ -240,6 +241,34 @@ namespace GoveeLights
         void Emit(DaemonConfig cfg, DeviceRuntime d, ResolvedStyle style, Frame frame)
         {
             var now = DateTime.UtcNow;
+
+            // Once per second per device at DEBUG, before any early return: what this
+            // device actually resolved to and which wire path the frame is taking.
+            //
+            // DeviceSegmentsColor returns "0" whether or not the strip honours it, so a
+            // flattened segment write is invisible from the return code, invisible in the
+            // log, and invisible to any headless test. Diagnosing that cost an hour of
+            // guessing from the outside; this is the trace that would have answered it in
+            // one run.
+            if (Log.Level <= LogLevel.Debug && (now - d.LastTraceAt).TotalMilliseconds >= 1000)
+            {
+                d.LastTraceAt = now;
+                Log.Debug("emit_trace", d.Cfg.Name, new Dictionary<string, object>
+                {
+                    { "state", _current.ToString() },
+                    { "effect", style.Effect },
+                    { "segs", d.Segments },
+                    { "animate", d.Cfg.Animate },
+                    { "path", frame.Segments == null ? "solid" : "segments[" + frame.Segments.Length + "]" },
+                    { "cells", frame.Segments == null
+                        ? frame.Solid.ToHex()
+                        : string.Join(" ", frame.Segments.Take(4).Select(c => c.ToHex())) },
+                    { "razerPrimed", d.RazerPrimed },
+                    { "gradientOff", cfg.IsGradientOff },
+                    { "brightness", style.Brightness }
+                });
+            }
+
             if ((now - d.LastSendAt).TotalMilliseconds < cfg.Render.MinDeviceIntervalMs) return;
 
             // Devices must be on before anything else has an effect.
