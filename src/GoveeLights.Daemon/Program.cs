@@ -48,6 +48,11 @@ namespace GoveeLights
             if (args.Any(a => string.Equals(a, "--dump-frames", StringComparison.OrdinalIgnoreCase)))
                 return FrameDump.Run(args);
 
+            // Headless emission dump: the real Renderer against a recording transport,
+            // for wire-timing tests (Test-Emits.ps1). Same contract: no side effects.
+            if (args.Any(a => string.Equals(a, "--dump-emits", StringComparison.OrdinalIgnoreCase)))
+                return EmitDump.Run(args);
+
             var console = args.Any(a => a == "--console");
             if (console) { AllocConsole(); Log.AlsoConsole = true; }
 

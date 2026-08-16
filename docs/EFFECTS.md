@@ -109,10 +109,21 @@ duplicating `Direction`.
 ## Cost
 
 `rainbow` recomputes every segment on every frame, so it emits a new segment update
-at the maximum permitted rate. This is bounded — `MinDeviceIntervalMs` caps each
-device at 25 updates/sec and `MaxCallsPerSecGlobal` caps the total — but it will sit
-at that ceiling for as long as the state is active. Everything else changes far less
-often, and `sparkle` in particular only emits when its twinkle step advances.
+as fast as it is allowed to. That allowance is `MinSegmentIntervalMs` (default 200ms,
+i.e. 5 updates/sec per device), which paces every segment-path write — deliberately
+far below the 25/sec that `MinDeviceIntervalMs` permits the colour path. The strip
+hardware wedges under sustained ~20+/sec segment floods, ignoring every write for
+tens of seconds while returning success for each one (camera-verified 2026-08-15;
+`scripts/Test-Emits.ps1` guards the pacing). Everything else changes far less often,
+and `sparkle` in particular only emits when its twinkle step advances.
+
+Two more timing behaviours worth knowing, same root cause: transitions into or out of
+a segment-rendering state jump-cut rather than cross-fade (a blended fade emits a
+fresh segment CSV every tick — exactly the flood above), and for ~`SegmentEngageMs`
+(default 5s) after a DreamView prime the daemon sends a solid average instead of
+segment frames, because writes inside the engagement window render flattened anyway.
+In practice: a segment state entered shortly after daemon start shows its colour
+immediately and starts moving a few seconds later.
 
 ## Seeing an effect without hardware
 

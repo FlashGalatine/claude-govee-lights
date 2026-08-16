@@ -25,11 +25,13 @@ namespace GoveeLights
             public DateTime LastSendAt = DateTime.MinValue;
             public DateTime LastKeepaliveAt = DateTime.MinValue;
             public bool RazerPrimed;
+            public DateTime RazerPrimedAt = DateTime.MinValue;
+            public DateTime LastSegSendAt = DateTime.MinValue;
             public bool SwitchedOn;
             public DateTime LastTraceAt = DateTime.MinValue;
         }
 
-        readonly GoveeClient _govee;
+        readonly IGoveeTransport _govee;
         readonly SessionStore _sessions;
         readonly Func<DaemonConfig> _cfg;
         readonly StyleStore _styles;
@@ -70,7 +72,7 @@ namespace GoveeLights
         public int SendCount { get; private set; }
         public DateTime LastActivityAt { get; private set; } = DateTime.UtcNow;
 
-        public Renderer(GoveeClient govee, SessionStore sessions, Func<DaemonConfig> cfg, StyleStore styles)
+        public Renderer(IGoveeTransport govee, SessionStore sessions, Func<DaemonConfig> cfg, StyleStore styles)
         {
             _govee = govee;
             _sessions = sessions;
@@ -96,17 +98,22 @@ namespace GoveeLights
 
             lock (_devGate)
             {
+                // Rebuilding must not forget what the wire already knows: losing
+                // RazerPrimed here made every config save restart the DreamView
+                // engagement dwell, and losing SwitchedOn re-switched devices that were
+                // already on. Matched by name, the only identity the API has.
+                var prior = _devices.ToDictionary(x => x.Cfg.Name, x => x, StringComparer.OrdinalIgnoreCase);
                 _devices.Clear();
 
                 // No explicit config: drive everything that reports LAN control on.
                 if (cfg.Devices == null || cfg.Devices.Count == 0)
                 {
                     foreach (var d in discovered.Where(x => x.LanOn))
-                        _devices.Add(new DeviceRuntime
+                        _devices.Add(Adopt(new DeviceRuntime
                         {
                             Cfg = new DeviceConfig { Name = d.Name, Enabled = true, Animate = true, BrightnessCap = 100 },
                             Segments = d.SegmentNums
-                        });
+                        }, prior));
                 }
                 else
                 {
@@ -132,11 +139,11 @@ namespace GoveeLights
                                 new Dictionary<string, object> { { "device", c.Name } });
                             continue;
                         }
-                        _devices.Add(new DeviceRuntime
+                        _devices.Add(Adopt(new DeviceRuntime
                         {
                             Cfg = c,
                             Segments = c.Segments > 0 ? c.Segments : found.SegmentNums
-                        });
+                        }, prior));
                     }
                 }
 
@@ -145,7 +152,44 @@ namespace GoveeLights
                     { "count", _devices.Count },
                     { "devices", string.Join(",", _devices.Select(d => d.Cfg.Name + "[" + d.Segments + "]")) }
                 });
+
+                // Prime DreamView now rather than lazily at the first segment frame:
+                // engagement takes ~3-5s (camera-measured), so priming at sync means the
+                // dwell has usually elapsed before any segment state is entered and
+                // animations start instantly instead of opening flattened. No
+                // RefreshDevices here - SyncDevices runs from the DevicesLoaded callback,
+                // and refreshing from inside it would loop.
+                foreach (var d in _devices)
+                {
+                    if (d.Segments > 1 && d.Cfg.Animate && d.Cfg.ManageRazerSwitch && !d.RazerPrimed)
+                    {
+                        _govee.Razer(d.Cfg.Name, true);
+                        d.RazerPrimed = true;
+                        d.RazerPrimedAt = DateTime.UtcNow;
+                    }
+                }
             }
+        }
+
+        /// <summary>Carry wire-state from a device's previous runtime across a roster
+        /// rebuild. The device did not change because the config was saved; treating it
+        /// as new re-primes, re-switches and re-sends things the hardware already has.</summary>
+        static DeviceRuntime Adopt(DeviceRuntime fresh, Dictionary<string, DeviceRuntime> prior)
+        {
+            DeviceRuntime old;
+            if (prior.TryGetValue(fresh.Cfg.Name, out old))
+            {
+                fresh.LastRgb = old.LastRgb;
+                fresh.LastSegCsv = old.LastSegCsv;
+                fresh.LastBrightness = old.LastBrightness;
+                fresh.LastSendAt = old.LastSendAt;
+                fresh.LastKeepaliveAt = old.LastKeepaliveAt;
+                fresh.RazerPrimed = old.RazerPrimed;
+                fresh.RazerPrimedAt = old.RazerPrimedAt;
+                fresh.LastSegSendAt = old.LastSegSendAt;
+                fresh.SwitchedOn = old.SwitchedOn;
+            }
+            return fresh;
         }
 
         void Loop()
@@ -229,9 +273,16 @@ namespace GoveeLights
                     // rather than snapping. Only inside the TransitionMs window.
                     // tInPrevState, not tInState: the outgoing state's clock did not
                     // restart just because we left it.
+                    //
+                    // Solid-to-solid only. A fade touching a segment frame is a jump cut
+                    // instead: blending emits a fresh interpolated CSV every tick, and
+                    // that ~25/s burst is exactly the flood that wedges the strip into
+                    // ignoring all writes (camera-verified 2026-08-15; Test-Emits.ps1
+                    // guards it).
                     var prev = Palette.ResolveFor(cfg, _styles, d.Cfg, _previous, segs);
                     var prevFrame = Effects.Render(prev, t, tInPrevState, segs);
-                    frame = Effects.Blend(prevFrame, frame, mix);
+                    if (frame.Segments == null && prevFrame.Segments == null)
+                        frame = Effects.Blend(prevFrame, frame, mix);
                 }
 
                 Emit(cfg, d, style, frame);
@@ -296,40 +347,114 @@ namespace GoveeLights
 
             if (frame.Segments != null && d.Segments > 1)
             {
-                if (!d.RazerPrimed && d.Cfg.ManageRazerSwitch)
+                if (d.Cfg.ManageRazerSwitch)
                 {
-                    // Segment colours are silently dropped unless Razer/DreamView mode is on.
-                    _govee.Razer(d.Cfg.Name, true);
-                    _govee.RefreshDevices();
-                    d.RazerPrimed = true;
+                    // Segment colours are rendered as a flattened average - not dropped,
+                    // not an error - unless Razer/DreamView mode is on AND has finished
+                    // engaging. The mode is a session with a TTL of a few minutes, not a
+                    // latch, so the prime refreshes on a period; that also covers a
+                    // device that power-cycled invisibly (its prime is necessarily old
+                    // by the time segments resume). Gated on RazerPrimedAt, so the dwell
+                    // below cannot retrigger this every tick and reset its own clock.
+                    var period = cfg.Render.SegmentRePrimeSeconds;
+                    var expired = d.RazerPrimed && period > 0
+                        && (now - d.RazerPrimedAt).TotalSeconds > period;
+                    if (!d.RazerPrimed || expired)
+                    {
+                        _govee.Razer(d.Cfg.Name, true);
+                        _govee.RefreshDevices();
+                        d.RazerPrimed = true;
+                        d.RazerPrimedAt = now;
+                    }
                 }
 
-                var csv = string.Join(",", frame.Segments.Select(c => c.ToHex()));
-                if (csv != d.LastSegCsv || keepaliveDue)
+                // Writes inside the engagement window come out flattened anyway, so send
+                // the same average deliberately - but as a UNIFORM SEGMENT CSV, never
+                // via DeviceColorControl: a Color write silently knocks H6066 panels out
+                // of DreamView (camera kill-test 2026-08-16), which would murder the
+                // very engagement this dwell is waiting for. Pre-engagement, a uniform
+                // CSV flattens to exactly itself, so the look is identical either way.
+                // The state's colour still appears instantly; motion joins ~5s later.
+                if (d.RazerPrimed &&
+                    (now - d.RazerPrimedAt).TotalMilliseconds < cfg.Render.SegmentEngageMs)
                 {
-                    if (!TakeToken()) return;
-                    _govee.Segments(d.Cfg.Name, csv, cfg.IsGradientOff);
-                    d.LastSegCsv = csv;
-                    d.LastRgb = new Rgb(-1, -1, -1);
-                    d.LastSendAt = now;
-                    if (keepaliveDue) d.LastKeepaliveAt = now;
-                    SendCount++;
+                    var avg = Average(frame.Segments);
+                    SendSegments(cfg, d,
+                        string.Join(",", Enumerable.Repeat(avg.ToHex(), frame.Segments.Length)),
+                        keepaliveDue, now);
+                    return;
                 }
+
+                SendSegments(cfg, d,
+                    string.Join(",", frame.Segments.Select(c => c.ToHex())),
+                    keepaliveDue, now);
+            }
+            else if (d.Segments > 1 && d.Cfg.ManageRazerSwitch)
+            {
+                // Solid frames for a segment-capable device ride the segments path as a
+                // uniform CSV (the same trick ApplySessionEnd uses): DeviceColorControl
+                // silently kills DreamView on H6066 panels, so using it here would make
+                // every solid interlude cost a re-engagement dwell on the next effect.
+                // With this, the prime lives for the whole session.
+                SendSegments(cfg, d,
+                    string.Join(",", Enumerable.Repeat(frame.Solid.ToHex(), d.Segments)),
+                    keepaliveDue, now);
             }
             else
             {
-                // Quantize so a smooth curve does not emit near-identical frames.
-                if (d.LastRgb.R < 0 || frame.Solid.MaxDelta(d.LastRgb) >= cfg.Render.RgbQuantize || keepaliveDue)
-                {
-                    if (!TakeToken()) return;
-                    _govee.Color(d.Cfg.Name, frame.Solid.R, frame.Solid.G, frame.Solid.B);
-                    d.LastRgb = frame.Solid;
-                    d.LastSegCsv = null;
-                    d.LastSendAt = now;
-                    if (keepaliveDue) d.LastKeepaliveAt = now;
-                    SendCount++;
-                }
+                SendSolid(cfg, d, frame.Solid, keepaliveDue, now);
             }
+        }
+
+        /// <summary>The segment wire path. Paced far below MinDeviceIntervalMs on
+        /// purpose: sustained ~20+/s segment floods wedge the strip into ignoring every
+        /// write for tens of seconds (camera-verified). Effects still read fine at
+        /// 4-6 fps.</summary>
+        void SendSegments(DaemonConfig cfg, DeviceRuntime d, string csv, bool keepaliveDue, DateTime now)
+        {
+            if ((now - d.LastSegSendAt).TotalMilliseconds < cfg.Render.MinSegmentIntervalMs) return;
+
+            if (csv != d.LastSegCsv || keepaliveDue)
+            {
+                if (!TakeToken()) return;
+                _govee.Segments(d.Cfg.Name, csv, cfg.IsGradientOff);
+                d.LastSegCsv = csv;
+                d.LastRgb = new Rgb(-1, -1, -1);
+                d.LastSendAt = now;
+                d.LastSegSendAt = now;
+                if (keepaliveDue) d.LastKeepaliveAt = now;
+                SendCount++;
+            }
+        }
+
+        /// <summary>The whole-device colour path, shared by solid frames and the
+        /// engagement-dwell fallback. Quantized so a smooth curve does not emit
+        /// near-identical frames.</summary>
+        void SendSolid(DaemonConfig cfg, DeviceRuntime d, Rgb rgb, bool keepaliveDue, DateTime now)
+        {
+            if (d.LastRgb.R < 0 || rgb.MaxDelta(d.LastRgb) >= cfg.Render.RgbQuantize || keepaliveDue)
+            {
+                if (!TakeToken()) return;
+                _govee.Color(d.Cfg.Name, rgb.R, rgb.G, rgb.B);
+                // A Color write silently drops H6066 panels out of DreamView (camera
+                // kill-test 2026-08-16; H619A strips tolerate it). Treat the prime as
+                // dead so the next segment state re-primes instead of writing into a
+                // dead mode - the cost is one engagement dwell per solid-to-segment
+                // transition, which is correct on panels and harmless on strips.
+                if (d.Segments > 1 && d.Cfg.ManageRazerSwitch) d.RazerPrimed = false;
+                d.LastRgb = rgb;
+                d.LastSegCsv = null;
+                d.LastSendAt = now;
+                if (keepaliveDue) d.LastKeepaliveAt = now;
+                SendCount++;
+            }
+        }
+
+        static Rgb Average(Rgb[] cells)
+        {
+            int r = 0, g = 0, b = 0;
+            for (int i = 0; i < cells.Length; i++) { r += cells[i].R; g += cells[i].G; b += cells[i].B; }
+            return new Rgb(r / cells.Length, g / cells.Length, b / cells.Length);
         }
 
         void ApplySessionEnd(DaemonConfig cfg)

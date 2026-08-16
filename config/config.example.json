@@ -33,8 +33,13 @@
     "MaxCallsPerSecGlobal": 90,
     "KeepaliveSeconds": 30,
     "TransitionMs": 200,
-    "RgbQuantize": 3
+    "RgbQuantize": 3,
+    "MinSegmentIntervalMs": 200,
+    "SegmentEngageMs": 5000,
+    "SegmentRePrimeSeconds": 120
   },
+
+  "_comment_render": "The three segment knobs exist because the hardware punishes segment-write timing invisibly (every write returns 0 regardless): floods of ~20+/s wedge a strip into ignoring all writes for tens of seconds, and writes within ~5s of a DreamView prime render as a flattened average. MinSegmentIntervalMs paces the segment path, SegmentEngageMs sends a solid average during the engagement dwell, SegmentRePrimeSeconds refreshes the prime on a period because DreamView engagement expires after a few minutes (and a power-cycled device silently loses it). See scripts/Test-Emits.ps1.",
 
   "_comment_states": "Effects: solid, breathe, pulse, blink, chase, comet, wipe, progress, sparkle, rainbow. Chase, comet, wipe, progress and rainbow need SegmentNums > 1 and fall back to breathe otherwise. Every field is optional and inherits when omitted, so an entry may set Hz alone. Modifiers: Color2, Direction (forward|reverse|pingpong), Easing (linear|sine|cubic|expo), Tail, Depth, FullSeconds. Brightness -1 leaves it alone. See docs/EFFECTS.md.",
   "States": {

@@ -53,7 +53,7 @@ namespace GoveeLights
     ///
     /// The bindingRedirect that makes any of this work at all lives in App.config.
     /// </summary>
-    public sealed class GoveeClient : IDisposable
+    public sealed class GoveeClient : IGoveeTransport, IDisposable
     {
         readonly string _dllPath;
         readonly string _guid;

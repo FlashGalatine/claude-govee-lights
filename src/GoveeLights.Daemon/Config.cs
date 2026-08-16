@@ -46,6 +46,28 @@ namespace GoveeLights
         public int KeepaliveSeconds { get; set; } = 30;
         public int TransitionMs { get; set; } = 200;
         public int RgbQuantize { get; set; } = 3;           // skip sends below this delta
+
+        /// <summary>Minimum gap between DeviceSegmentsColor writes per device. Far larger
+        /// than MinDeviceIntervalMs on purpose: sustained ~20+/s segment floods wedge the
+        /// strip into ignoring every write - segments, colour, brightness - for tens of
+        /// seconds (camera-verified 2026-08-15). Effects still read fine at 4-6 fps.
+        /// 0 disables the extra pacing.</summary>
+        public int MinSegmentIntervalMs { get; set; } = 200;
+
+        /// <summary>How long after a Razer/DreamView prime segment writes are assumed to
+        /// land pre-engagement. Engagement was measured at ~3-5s, and a write inside the
+        /// window is rendered as a flattened average - so during the dwell the renderer
+        /// sends that same average itself, via the reliable Color path. 0 disables.</summary>
+        public int SegmentEngageMs { get; set; } = 5000;
+
+        /// <summary>Re-issue the Razer prime whenever the segment path runs and the last
+        /// prime is older than this. DreamView engagement is a session with a TTL of a
+        /// few minutes, not a latch (camera-verified: identical chase traffic rendered
+        /// right after a prime and flattened minutes later), and a power-cycled device
+        /// reboots with the mode off invisibly - a periodic refresh covers both. Each
+        /// refresh costs one SegmentEngageMs dwell of solid-average rendering.
+        /// 0 disables re-priming.</summary>
+        public int SegmentRePrimeSeconds { get; set; } = 120;
     }
 
     public class QuietHours
@@ -230,6 +252,9 @@ namespace GoveeLights
             if (ToolClassMap == null) ToolClassMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (QuietHours == null) QuietHours = new QuietHours();
             if (Render.TickMs < 10) Render.TickMs = 10;
+            if (Render.MinSegmentIntervalMs < 0) Render.MinSegmentIntervalMs = 0;
+            if (Render.SegmentEngageMs < 0) Render.SegmentEngageMs = 0;
+            if (Render.SegmentRePrimeSeconds < 0) Render.SegmentRePrimeSeconds = 0;
             if (Port <= 0 || Port > 65535) Port = 17321;
         }
 
