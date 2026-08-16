@@ -1107,6 +1107,98 @@ if ($parsed['config/config.example.json']) {
     else { No 'config.example.json names an unknown effect' ($badEffects -join ', ') }
 }
 
+# ----------------------------------------------------------- shipped themes
+# themes/*.json are the example palettes '/govee theme install' copies into the user's
+# themes folder. They are also the only worked examples of the theme file format a
+# user will ever see, so a broken one is worse than a broken built-in: it teaches the
+# format wrong AND renders wrong. Everything a built-in must satisfy, these must too.
+Section 'Shipped themes'
+$themesDir = Join-Path $root 'themes'
+$shippedFiles = @(if (Test-Path $themesDir) { Get-ChildItem $themesDir -Filter '*.json' | Sort-Object Name })
+if ($shippedFiles.Count -ge 4) { Ok "themes/ ships $($shippedFiles.Count) example themes" (($shippedFiles | ForEach-Object { $_.BaseName }) -join ', ') }
+else { No 'themes/ ships at least four example themes' "found $($shippedFiles.Count)" }
+
+# Same rule as Themes.IsValidName, restated here so the no-build SKIP path still
+# catches a file whose name the daemon would refuse to load - the exe-gated check
+# below asks the daemon itself when a build is available.
+$shippedNameBad = @($shippedFiles | Where-Object { $_.BaseName -notmatch '\A[A-Za-z0-9_-]{1,32}\z' } | ForEach-Object { $_.Name })
+if ($shippedNameBad.Count -eq 0) { Ok 'every shipped theme filename is a valid theme name' }
+else { No 'a shipped theme filename is not a valid theme name' ($shippedNameBad -join ', ') }
+
+$shippedParsed = @{}
+$shippedShapeBad = @()
+foreach ($f in $shippedFiles) {
+    try { $t = Get-Content $f.FullName -Raw | ConvertFrom-Json } catch { $shippedShapeBad += "$($f.Name): $($_.Exception.Message)"; continue }
+    $shippedParsed[$f.BaseName] = $t
+    # Name must equal the filename: TryLoad overwrites Name from the filename anyway,
+    # so a mismatch is not a runtime bug - it is a wrong example, and a user copying
+    # the file to rename a theme would learn that the Name field matters when it does not.
+    if ($t.Name -ne $f.BaseName) { $shippedShapeBad += "$($f.Name): Name '$($t.Name)' != filename" }
+    if (-not $t.Description) { $shippedShapeBad += "$($f.Name): no Description" }
+    if (-not $t.States -or @($t.States.PSObject.Properties).Count -eq 0) { $shippedShapeBad += "$($f.Name): no States" }
+}
+if ($shippedShapeBad.Count -eq 0) { Ok 'every shipped theme parses with Name = filename, a Description and States' }
+else { No 'a shipped theme is malformed' ($shippedShapeBad -join '; ') }
+
+# Static effect check, mirroring the config.example.json one above - $known is the
+# engine's list when a build is present, the stated fallback otherwise.
+$shippedEffectBad = @()
+foreach ($kv in $shippedParsed.GetEnumerator()) {
+    foreach ($p in $kv.Value.States.PSObject.Properties) {
+        $e = $p.Value.Effect
+        if ($e -and ($known -notcontains $e)) { $shippedEffectBad += "$($kv.Key).$($p.Name)=$e" }
+    }
+}
+if ($shippedEffectBad.Count -eq 0) { Ok 'every shipped theme names only known effects (static)' }
+else { No 'a shipped theme names an unknown effect' ($shippedEffectBad -join ', ') }
+
+if (-not $exe) {
+    Write-Host '  SKIP  daemon-side theme checks need a build (run scripts\Build.ps1)' -ForegroundColor DarkGray
+} elseif ($shippedFiles.Count -gt 0) {
+    # Point the daemon's user-themes dir at the repo folder: every shipped file then
+    # goes through the exact TryLoad + IsComplete + Palette.Norm path a user's copy
+    # will, and the daemon - not a regex here - is the authority on all three.
+    $shipRows = @(Invoke-Dump @('--list-themes', '--themes-dir', $themesDir) | Where-Object { $_ -and $_ -notlike 'name,*' -and $_.Split(',')[1] -eq 'no' })
+    $shipListed = @($shipRows | ForEach-Object { $_.Split(',')[0] })
+    $shipMissing = @($shippedFiles | Where-Object { $shipListed -notcontains $_.BaseName } | ForEach-Object { $_.Name })
+    if ($shipMissing.Count -eq 0) { Ok 'the daemon lists every shipped theme as a loadable user theme' }
+    else { No 'the daemon does not list a shipped theme (name rejected or file unreadable)' ($shipMissing -join ', ') }
+
+    $shipIncomplete = @($shipRows | Where-Object { $_.Split(',')[5] -ne 'yes' } | ForEach-Object { $_.Split(',')[0] })
+    if ($shipIncomplete.Count -eq 0) { Ok 'every shipped theme names exactly the Activity states (Themes.IsComplete)' }
+    else { No 'a shipped theme is missing or misnames a state' ($shipIncomplete -join ', ') }
+
+    # Any style_unknown_value on stderr - Effect, Direction, Easing or an unparsable
+    # colour - is a field the daemon silently replaced with a default. Gate on the
+    # run having actually resolved every state, for the reason spelled out on the
+    # built-in check above.
+    $stateCountShip = (@(Invoke-Dump @('--resolve-states')) | Where-Object { $_ -and $_ -notlike 'state,*' }).Count
+    $shipResolveBad = @()
+    foreach ($f in $shippedFiles) {
+        $cap = Invoke-DumpCapture @('--resolve-states', '--theme', $f.BaseName, '--themes-dir', $themesDir)
+        $rows = @($cap.StdOut | Where-Object { $_ -and $_ -notlike 'state,*' })
+        if ($cap.ExitCode -ne 0 -or $rows.Count -ne $stateCountShip) {
+            $shipResolveBad += "$($f.BaseName) (did not resolve: exit=$($cap.ExitCode) rows=$($rows.Count))"
+        } elseif ($cap.StdErr -match '"evt":"style_unknown_value"') {
+            $shipResolveBad += "$($f.BaseName) (unknown value: $(($cap.StdErr -split "`n" | Select-String style_unknown_value | Select-Object -First 1)))"
+        }
+    }
+    if ($shipResolveBad.Count -eq 0) { Ok 'every shipped theme resolves through the daemon with no unknown-value warning' }
+    else { No 'a shipped theme has a field the daemon rejects' ($shipResolveBad -join '; ') }
+}
+
+# The install verb is what makes the shipped files reachable from the prompt, and it
+# is CLI-only (the daemon never sees the plugin folder). Same 12-space indent rule
+# as the nested theme sub-switch noted in the verb check above.
+if ($cliText -match "(?m)^            'install'\s*\{") { Ok "the CLI's theme verb has an install sub-command" }
+else { No "the CLI's theme verb has an install sub-command" }
+$themeLine = [regex]::Match($readmeText, '(?m)^\s*/govee\s+theme\s+(.*)$')
+if ($themeLine.Success -and $themeLine.Groups[1].Value -match '\binstall\b') { Ok 'README documents theme install' }
+else { No 'README documents theme install' 'the /govee theme line in the Commands block must list install' }
+$govMd = Get-Content (Join-Path $root 'commands/govee.md') -Raw
+if ($govMd -match 'theme [^\r\n"]*\binstall\b') { Ok 'commands/govee.md argument-hint lists theme install' }
+else { No 'commands/govee.md argument-hint lists theme install' }
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue

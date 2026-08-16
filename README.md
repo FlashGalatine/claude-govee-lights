@@ -82,7 +82,7 @@ first run, seeded with the GUID from `Govee-API-GUID.txt`. It hot-reloads on sav
 /govee reset      clear a state (or --all) toward built-in — unsaved until save
 /govee save       write pending changes to config.json
 /govee revert     discard every pending change
-/govee theme      list | apply <name> | save <name>
+/govee theme      list | apply <name> | save <name> | install <name>|--all
 ```
 
 ## States
@@ -141,6 +141,15 @@ and `/govee theme save <name>` to keep your current setup as one. Applying a the
 is total: it discards any unsaved edits, any state the theme doesn't mention falls
 back to built-in, and — like `set` and `reset` — the change is itself unsaved until
 `/govee save`.
+
+Four themes are built in (`default`, `muted`, `vivid`, `mono`), and six more ship as
+example files in [themes/](themes/) — `sunset`, `ocean`, `forest`, `neon`, `candle`
+and `signal`. `/govee theme list` shows them as `example` until you install one:
+`/govee theme install sunset` (or `--all`) copies the file into
+`%LOCALAPPDATA%\ClaudeGovee\themes\`, after which it is an ordinary saved theme —
+apply it, edit the file, or delete it to uninstall. Installing never overwrites a
+theme already there. Each file is exactly what `theme save` writes, so they double as
+templates: copy one, rename it, change the colours.
 
 The config file is still there and still hot-reloads, if you prefer editing it:
 

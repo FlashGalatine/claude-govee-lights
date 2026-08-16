@@ -484,9 +484,33 @@ switch ($Command.ToLowerInvariant()) {
         # A theme IS the palette - none of list/apply/save sends a patch, so
         # 'theme apply muted --color FF0000' has no colour to apply and must say so
         # rather than reporting a clean success it did not deliver.
-        $parsed = Parse-StyleArgs $Rest -NoStyleFlagsFor 'theme'
+        # 'install --all' is the one flag this verb takes; it is neither a style field
+        # nor a positional name.
+        $parsed = Parse-StyleArgs $Rest -ExtraFlags @('all') -NoStyleFlagsFor 'theme'
         $sub = if ($parsed.Positional.Count -gt 0) { $parsed.Positional[0].ToLowerInvariant() } else { 'list' }
         $name = if ($parsed.Positional.Count -gt 1) { $parsed.Positional[1] } else { $null }
+        if ($parsed.Flags['all'] -and $sub -ne 'install') {
+            # Same rule as unknown flags: a typed flag that does nothing must not
+            # report a clean success it did not deliver.
+            throw "--all only applies to 'theme install'"
+        }
+
+        # Example themes ship with the plugin as themes/*.json, one directory above this
+        # script. The daemon never sees that folder - it launches with no arguments and
+        # knows only %LOCALAPPDATA%\ClaudeGovee\themes (Themes.UserDir) - so 'install'
+        # is a plain file copy from the one to the other, done here. Once copied, an
+        # example is an ordinary saved theme: it lists as 'saved', it shadows a built-in
+        # of the same name, and deleting the file uninstalls it.
+        $exampleDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'themes'
+        $userThemeDir = Join-Path $env:LOCALAPPDATA 'ClaudeGovee\themes'
+        $examples = @(if (Test-Path $exampleDir) { Get-ChildItem $exampleDir -Filter '*.json' | Sort-Object Name })
+        function Get-ExampleDescription($file) {
+            try { $d = (Get-Content $file.FullName -Raw | ConvertFrom-Json).Description } catch { $d = $null }
+            if ($d) { "$d" } else { '(example theme)' }
+        }
+        function Test-ExampleInstalled($file) {
+            Test-Path (Join-Path $userThemeDir $file.Name)
+        }
 
         switch ($sub) {
             'list' {
@@ -497,9 +521,54 @@ switch ($Command.ToLowerInvariant()) {
                     $kind = if ($x.builtin) { if ($x.shadowed) { 'built-in*' } else { 'built-in' } } else { 'saved' }
                     Write-Output ("  {0,-14}{1,-10}{2}" -f $x.name, $kind, $x.description)
                 }
+                # Shipped examples that are not yet in the user's themes folder. The
+                # daemon cannot list these (it has never seen the file), so they would
+                # otherwise be invisible until someone reads the README. An installed
+                # example already appears above as 'saved', so it is not repeated here.
+                $notInstalled = @($examples | Where-Object { -not (Test-ExampleInstalled $_) })
+                foreach ($f in $notInstalled) {
+                    Write-Output ("  {0,-14}{1,-10}{2}" -f $f.BaseName, 'example', (Get-ExampleDescription $f))
+                }
                 if ($t.themes | Where-Object { $_.shadowed }) {
                     Write-Output ""
                     Write-Output "* shadowed by a saved theme of the same name."
+                }
+                if ($notInstalled.Count -gt 0) {
+                    Write-Output ""
+                    Write-Output "example = ships with the plugin; '/govee theme install <name>' (or --all) copies it into your themes."
+                }
+            }
+            'install' {
+                $wantAll = [bool]$parsed.Flags['all']
+                if (-not $name -and -not $wantAll) { Write-Output "Usage: /govee theme install <name> | --all"; break }
+                if ($name -and $wantAll) { Write-Output "Give a name or --all, not both."; break }
+                if ($examples.Count -eq 0) { Write-Output "No example themes found at $exampleDir."; break }
+
+                $targets = if ($wantAll) { $examples } else {
+                    @($examples | Where-Object { $_.BaseName -ieq $name })
+                }
+                if ($targets.Count -eq 0) {
+                    Write-Output "No example theme named '$name'. Available: $(($examples | ForEach-Object { $_.BaseName }) -join ', ')."
+                    break
+                }
+
+                New-Item -ItemType Directory -Force -Path $userThemeDir | Out-Null
+                $installed = @()
+                foreach ($f in $targets) {
+                    # Never overwrite: an installed copy may have been edited, and 'save'
+                    # to the same name is the user's own theme now. Idempotent by design -
+                    # running install twice is safe and says so.
+                    if (Test-ExampleInstalled $f) {
+                        Write-Output "'$($f.BaseName)' is already installed - edit or delete $(Join-Path $userThemeDir $f.Name) to change it."
+                        continue
+                    }
+                    Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $userThemeDir $f.Name)
+                    $installed += $f.BaseName
+                }
+                if ($installed.Count -eq 1) {
+                    Write-Output "Installed '$($installed[0])' - '/govee theme apply $($installed[0])' to try it."
+                } elseif ($installed.Count -gt 1) {
+                    Write-Output "Installed $($installed.Count) themes: $($installed -join ', ') - '/govee theme apply <name>' to try one."
                 }
             }
             'apply' {
@@ -514,7 +583,16 @@ switch ($Command.ToLowerInvariant()) {
                 $hadPending = [bool]($before -and $before.dirty)
 
                 $r = Call '/themes/apply' 'Post' @{ name = $name }
-                if (-not $r) { Show-CallFailure; break }
+                if (-not $r) {
+                    Show-CallFailure
+                    # The daemon only knows built-ins and installed files. If the name
+                    # matches an example that was never installed, that is the fix.
+                    $ex = @($examples | Where-Object { $_.BaseName -ieq $name -and -not (Test-ExampleInstalled $_) })
+                    if ($script:LastErrorBody -match 'no such theme' -and $ex.Count -gt 0) {
+                        Write-Output "'$($ex[0].BaseName)' is an example theme that is not installed yet - '/govee theme install $($ex[0].BaseName)' first."
+                    }
+                    break
+                }
                 Write-Output "Applied theme '$($r.theme)'. Unsaved - '/govee save' to keep it."
                 if ($hadPending) {
                     Write-Output "Your pending 'set'/'reset' edits were discarded - applying a theme replaces the whole palette."
@@ -527,7 +605,7 @@ switch ($Command.ToLowerInvariant()) {
                 if ($r.saved) { Write-Output "Saved current styles as theme '$name'." }
                 else { Write-Output "Nothing to save - no styles are set yet." }
             }
-            default { Write-Output "Usage: /govee theme list | apply <name> | save <name>" }
+            default { Write-Output "Usage: /govee theme list | apply <name> | save <name> | install <name>|--all" }
         }
     }
 
@@ -548,7 +626,7 @@ switch ($Command.ToLowerInvariant()) {
         Write-Output "  reset     put a state (or --all) back to its built-in default"
         Write-Output "  save      write pending changes to config.json"
         Write-Output "  revert    discard pending changes"
-        Write-Output "  theme     list | apply <name> | save <name>"
+        Write-Output "  theme     list | apply <name> | save <name> | install <name>|--all"
     }
 }
 

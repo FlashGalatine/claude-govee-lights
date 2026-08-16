@@ -1,0 +1,20 @@
+{
+  "Name": "sunset",
+  "Description": "Warm - plum, coral, gold and rose",
+  "States": {
+    "Idle":        { "Color": "#3B1F3F", "Effect": "breathe", "Hz": 0.12, "Brightness": 25 },
+    "Thinking":    { "Color": "#FF6B5A", "Effect": "breathe", "Hz": 0.6, "Brightness": 55 },
+    "ToolRead":    { "Color": "#FFC15E", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolEdit":    { "Color": "#FF8C42", "Effect": "chase", "Hz": 0.6, "Brightness": 60 },
+    "ToolShell":   { "Color": "#FF4E50", "Effect": "chase", "Hz": 0.8, "Brightness": 60 },
+    "ToolWeb":     { "Color": "#E85D75", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolMcp":     { "Color": "#C13584", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolAgent":   { "Color": "#FF2E93", "Effect": "comet", "Hz": 0.7, "Brightness": 60, "Tail": 1.5 },
+    "ToolOther":   { "Color": "#D9A066", "Effect": "solid", "Hz": 0.5, "Brightness": 45 },
+    "Compacting":  { "Color": "#B5651D", "Effect": "wipe", "Hz": 0.35, "Brightness": 45 },
+    "WaitingUser": { "Color": "#FFD23F", "Effect": "pulse", "Hz": 1.3, "Brightness": 95 },
+    "Error":       { "Color": "#FF1E1E", "Effect": "blink", "Hz": 2.5, "Brightness": 80 },
+    "Done":        { "Color": "#FFB07C", "Effect": "solid", "Hz": 1.0, "Brightness": 70 },
+    "Offline":     { "Color": "#FFC58F", "Effect": "solid", "Hz": 0.0, "Brightness": 60 }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "Name": "neon",
+  "Description": "Cyberpunk - hot pink, electric cyan, violet; brighter and faster",
+  "States": {
+    "Idle":        { "Color": "#1A0033", "Effect": "breathe", "Hz": 0.2, "Brightness": 30 },
+    "Thinking":    { "Color": "#B026FF", "Effect": "breathe", "Hz": 0.8, "Brightness": 70 },
+    "ToolRead":    { "Color": "#00F0FF", "Effect": "chase", "Hz": 0.8, "Brightness": 75 },
+    "ToolEdit":    { "Color": "#39FF14", "Effect": "chase", "Hz": 0.9, "Brightness": 75 },
+    "ToolShell":   { "Color": "#FF6600", "Effect": "chase", "Hz": 1.2, "Brightness": 80, "Direction": "pingpong" },
+    "ToolWeb":     { "Color": "#0080FF", "Effect": "chase", "Hz": 0.8, "Brightness": 75 },
+    "ToolMcp":     { "Color": "#8A2BE2", "Effect": "chase", "Hz": 0.8, "Brightness": 75 },
+    "ToolAgent":   { "Color": "#FF10F0", "Effect": "comet", "Hz": 1.0, "Brightness": 80, "Color2": "#00F0FF", "Tail": 2.5 },
+    "ToolOther":   { "Color": "#F0F0F0", "Effect": "solid", "Hz": 0.5, "Brightness": 60 },
+    "Compacting":  { "Color": "#00FFC8", "Effect": "wipe", "Hz": 0.6, "Brightness": 70 },
+    "WaitingUser": { "Color": "#FFEA00", "Effect": "pulse", "Hz": 2.0, "Brightness": 100 },
+    "Error":       { "Color": "#FF0033", "Effect": "blink", "Hz": 3.5, "Brightness": 100 },
+    "Done":        { "Color": "#39FF14", "Effect": "sparkle", "Hz": 8.0, "Brightness": 90 },
+    "Offline":     { "Color": "#FF10F0", "Effect": "solid", "Hz": 0.0, "Brightness": 40 }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "Name": "candle",
+  "Description": "Night-friendly - warm, dim and slow; no chase or blink",
+  "States": {
+    "Idle":        { "Color": "#2A1206", "Effect": "breathe", "Hz": 0.08, "Brightness": 15 },
+    "Thinking":    { "Color": "#FF9A3C", "Effect": "breathe", "Hz": 0.3, "Brightness": 30 },
+    "ToolRead":    { "Color": "#FFD27F", "Effect": "breathe", "Hz": 0.4, "Brightness": 30 },
+    "ToolEdit":    { "Color": "#FFA94D", "Effect": "breathe", "Hz": 0.4, "Brightness": 35 },
+    "ToolShell":   { "Color": "#FF7A3D", "Effect": "breathe", "Hz": 0.5, "Brightness": 35 },
+    "ToolWeb":     { "Color": "#F7C6A5", "Effect": "breathe", "Hz": 0.4, "Brightness": 30 },
+    "ToolMcp":     { "Color": "#E8A87C", "Effect": "breathe", "Hz": 0.4, "Brightness": 30 },
+    "ToolAgent":   { "Color": "#FF8C69", "Effect": "breathe", "Hz": 0.5, "Brightness": 35 },
+    "ToolOther":   { "Color": "#D9B38C", "Effect": "solid", "Hz": 0.5, "Brightness": 25 },
+    "Compacting":  { "Color": "#C97B3A", "Effect": "solid", "Hz": 0.5, "Brightness": 25 },
+    "WaitingUser": { "Color": "#FFC53D", "Effect": "pulse", "Hz": 0.9, "Brightness": 55 },
+    "Error":       { "Color": "#FF4D2E", "Effect": "pulse", "Hz": 1.5, "Brightness": 50 },
+    "Done":        { "Color": "#FFD8A8", "Effect": "solid", "Hz": 1.0, "Brightness": 35 },
+    "Offline":     { "Color": "#FFB870", "Effect": "solid", "Hz": 0.0, "Brightness": 25 }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "Name": "ocean",
+  "Description": "Cool - navy, indigo, teal and seafoam",
+  "States": {
+    "Idle":        { "Color": "#0B1F3A", "Effect": "breathe", "Hz": 0.12, "Brightness": 25 },
+    "Thinking":    { "Color": "#4F6BFF", "Effect": "breathe", "Hz": 0.6, "Brightness": 55 },
+    "ToolRead":    { "Color": "#22D3EE", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolEdit":    { "Color": "#2DD4BF", "Effect": "chase", "Hz": 0.6, "Brightness": 60 },
+    "ToolShell":   { "Color": "#0EA5E9", "Effect": "chase", "Hz": 0.8, "Brightness": 60, "Direction": "pingpong" },
+    "ToolWeb":     { "Color": "#60A5FA", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolMcp":     { "Color": "#818CF8", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolAgent":   { "Color": "#7DF9FF", "Effect": "comet", "Hz": 0.7, "Brightness": 60, "Tail": 2.0 },
+    "ToolOther":   { "Color": "#94A3B8", "Effect": "solid", "Hz": 0.5, "Brightness": 45 },
+    "Compacting":  { "Color": "#14B8A6", "Effect": "wipe", "Hz": 0.35, "Brightness": 45 },
+    "WaitingUser": { "Color": "#FFB000", "Effect": "pulse", "Hz": 1.3, "Brightness": 95 },
+    "Error":       { "Color": "#FF2020", "Effect": "blink", "Hz": 2.5, "Brightness": 80 },
+    "Done":        { "Color": "#34D399", "Effect": "solid", "Hz": 1.0, "Brightness": 70 },
+    "Offline":     { "Color": "#9FD8FF", "Effect": "solid", "Hz": 0.0, "Brightness": 60 }
+  }
+}

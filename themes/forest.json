@@ -1,0 +1,20 @@
+{
+  "Name": "forest",
+  "Description": "Earthy - moss, sage, lime and honey",
+  "States": {
+    "Idle":        { "Color": "#10231A", "Effect": "breathe", "Hz": 0.12, "Brightness": 25 },
+    "Thinking":    { "Color": "#7FB069", "Effect": "breathe", "Hz": 0.6, "Brightness": 55 },
+    "ToolRead":    { "Color": "#A3E635", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolEdit":    { "Color": "#22C55E", "Effect": "chase", "Hz": 0.6, "Brightness": 60 },
+    "ToolShell":   { "Color": "#EAB308", "Effect": "chase", "Hz": 0.8, "Brightness": 60 },
+    "ToolWeb":     { "Color": "#5EEAD4", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolMcp":     { "Color": "#86EFAC", "Effect": "chase", "Hz": 0.5, "Brightness": 50 },
+    "ToolAgent":   { "Color": "#BEF264", "Effect": "comet", "Hz": 0.7, "Brightness": 60, "Tail": 1.5 },
+    "ToolOther":   { "Color": "#A8A29E", "Effect": "solid", "Hz": 0.5, "Brightness": 45 },
+    "Compacting":  { "Color": "#65A30D", "Effect": "wipe", "Hz": 0.35, "Brightness": 45 },
+    "WaitingUser": { "Color": "#F59E0B", "Effect": "pulse", "Hz": 1.3, "Brightness": 95 },
+    "Error":       { "Color": "#DC2626", "Effect": "blink", "Hz": 2.5, "Brightness": 80 },
+    "Done":        { "Color": "#FBBF24", "Effect": "solid", "Hz": 1.0, "Brightness": 70 },
+    "Offline":     { "Color": "#FDE68A", "Effect": "solid", "Hz": 0.0, "Brightness": 60 }
+  }
+}
