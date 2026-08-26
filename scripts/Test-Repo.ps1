@@ -66,6 +66,22 @@ if ($parsed['.claude-plugin/plugin.json'] -and $parsed['.claude-plugin/marketpla
     if ($pluginName -eq $marketName) { Ok 'plugin.json and marketplace.json agree on the name' "'$pluginName'" }
     else { No 'plugin.json / marketplace.json name mismatch' "'$pluginName' vs '$marketName'" }
 
+    # The marketplace's own name is the @suffix every user types, so the README's
+    # install line must spell it exactly as marketplace.json does - a rename in one
+    # place and not the other teaches an install command that fails.
+    $marketplaceName = [string]$parsed['.claude-plugin/marketplace.json'].name
+    $readmeForCheck = Get-Content (Join-Path $root 'README.md') -Raw
+    $installLine = [regex]::Match($readmeForCheck, '(?m)^/plugin install\s+(\S+)')
+    $expectedInstall = "$pluginName@$marketplaceName"
+    if ($installLine.Success -and $installLine.Groups[1].Value -eq $expectedInstall) {
+        Ok 'README install line names plugin@marketplace as marketplace.json defines them' $expectedInstall
+    } else {
+        $got = if ($installLine.Success) { $installLine.Groups[1].Value } else { '(no /plugin install line)' }
+        No 'README install line does not match plugin.json + marketplace.json' "expected '$expectedInstall', README has '$got'"
+    }
+    if ($marketplaceName -notmatch '-local$') { Ok 'marketplace name is the shareable one, not a -local dev name' "'$marketplaceName'" }
+    else { No 'marketplace name is a -local dev name' "users would have to install @$marketplaceName" }
+
     if ($parsed['.claude-plugin/plugin.json'].version) { Ok 'plugin.json declares a version' $parsed['.claude-plugin/plugin.json'].version }
     else { No 'plugin.json declares a version' }
 

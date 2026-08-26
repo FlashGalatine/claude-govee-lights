@@ -6,7 +6,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- The marketplace is named `claude-govee-lights` rather than
+  `claude-govee-lights-local`, so the install command is
+  `/plugin install claude-govee-lights@claude-govee-lights`. Anyone who added the
+  old name must remove it and add the marketplace again.
+- Every release is tagged (`v0.1.0` … `v0.4.0`) and the changelog links compare
+  between tags.
 
 ## [0.4.0] - 2026-08-26
 
@@ -76,6 +82,13 @@ The style engine: composable effects.
 - Spatial effects fall back to `breathe` on single-zone devices; `pingpong` no
   longer teleports at the turnaround.
 
+## [0.1.1] - 2026-08-09
+
+### Fixed
+- The daemon could idle out mid-session and never come back.
+- Lights stayed dark after a reboot until `/govee refresh`: the cold-start roster
+  window is documented and its recovery guarded.
+
 ## [0.1.0] - 2026-08-09
 
 ### Added
@@ -86,12 +99,9 @@ The style engine: composable effects.
   `System.Runtime.CompilerServices.Unsafe` binding redirect, without which every
   Govee call times out with a bogus GUID error.
 
-### Fixed
-- Lights stayed dark after a reboot until `/govee refresh`.
-- The daemon could idle out mid-session and never come back.
-
 [Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/1ca0e22...v0.4.0
-[0.3.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/3d1f2be...1ca0e22
-[0.2.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/12113da...3d1f2be
-[0.1.0]: https://github.com/FlashGalatine/claude-govee-lights/commits/3a4040f
+[0.4.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/FlashGalatine/claude-govee-lights/releases/tag/v0.1.0

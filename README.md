@@ -59,12 +59,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 guid <
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 doctor
 ```
 
-Then install the plugin in Claude Code:
+Then install the plugin in Claude Code. The repo is its own marketplace:
 
 ```
-/plugin marketplace add c:\dev\ClaudeGoveeLights
-/plugin install claude-govee-lights
+/plugin marketplace add FlashGalatine/claude-govee-lights
+/plugin install claude-govee-lights@claude-govee-lights
 ```
+
+If you are working on the plugin itself, add your checkout as the marketplace instead
+(`/plugin marketplace add c:\dev\ClaudeGoveeLights`) and install the same name from it.
+Note that `dist/` is not committed: the daemon is built by `Build.ps1` above, on your
+machine, and the plugin's hooks look for it there.
 
 Once it is installed, `/govee guid <value>` does step 2 from inside Claude Code, and
 `/govee doctor` tells you when the GUID is the thing missing.
@@ -261,7 +266,7 @@ govee_init_failed                            Govee Desktop is gone or elevated
 ## Layout
 
 ```
-.claude-plugin/    plugin manifest + local marketplace
+.claude-plugin/    plugin manifest + the marketplace that serves it
 hooks/hooks.json   the Claude Code integration contract
 commands/govee.md  the /govee slash command
 scripts/           build, launcher, CLI, probes, demo
