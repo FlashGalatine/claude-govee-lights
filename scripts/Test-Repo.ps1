@@ -1053,7 +1053,7 @@ if (-not $cmdBlock.Success) {
 # anything would leave the loop below iterating over an empty list and passing - and the
 # control-plane verbs are the ones this branch added, so silently dropping one from the
 # docs is a real regression in its own right.
-$mustBeDocumented = @('styles','set','reset','save','revert','preview','theme')
+$mustBeDocumented = @('styles','set','reset','save','revert','preview','theme','guid')
 $undocumented = @($mustBeDocumented | Where-Object { $documentedVerbs -notcontains $_ })
 if ($undocumented.Count -eq 0) { Ok 'README documents every control-plane verb' }
 else { No 'a control-plane verb is missing from the README Commands section' ($undocumented -join ', ') }
@@ -1198,6 +1198,92 @@ else { No 'README documents theme install' 'the /govee theme line in the Command
 $govMd = Get-Content (Join-Path $root 'commands/govee.md') -Raw
 if ($govMd -match 'theme [^\r\n"]*\binstall\b') { Ok 'commands/govee.md argument-hint lists theme install' }
 else { No 'commands/govee.md argument-hint lists theme install' }
+
+# ------------------------------------------------------------------- guid verb
+# `/govee guid <value>` is the one verb that cannot go through the daemon: a missing
+# GUID is the single condition under which the daemon refuses to run (Program.cs
+# exits 2 on no_guid), so the CLI has to edit config.json itself. These checks run the
+# real script as a child process against a scratch %LOCALAPPDATA%, on a port nothing
+# listens on and with --no-restart, so no daemon on this machine is touched.
+Section 'GUID verb'
+$govMd = Get-Content (Join-Path $root 'commands/govee.md') -Raw
+if ($govMd -match 'argument-hint:[^\r\n]*\bguid\b') { Ok 'commands/govee.md argument-hint lists guid' }
+else { No 'commands/govee.md argument-hint lists guid' }
+
+$cli = Join-Path $root 'scripts/Govee-Cli.ps1'
+$guidScratch = Join-Path ([System.IO.Path]::GetTempPath()) ("govee-guid-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $guidScratch 'ClaudeGovee') -Force | Out-Null
+$guidCfg = Join-Path $guidScratch 'ClaudeGovee\config.json'
+$savedLocalAppData = $env:LOCALAPPDATA
+function Invoke-CliScratch {
+    param([string[]] $CliArgs)
+    $env:LOCALAPPDATA = $guidScratch
+    try {
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $cli @CliArgs -Port 1 2>&1 | Out-String
+        return @{ Out = $out; Code = $LASTEXITCODE }
+    } finally { $env:LOCALAPPDATA = $savedLocalAppData }
+}
+try {
+    $value = '12345678-abcd-4ef0-9876-0123456789ab'
+
+    $r = Invoke-CliScratch @('guid')
+    if ($r.Out -match 'Usage: /govee guid <value>') { Ok 'guid with no value prints usage' }
+    else { No 'guid with no value prints usage' $r.Out }
+
+    $r = Invoke-CliScratch @('guid', 'not-a-guid', '--no-restart')
+    if ($r.Code -ne 0 -and $r.Out -match 'not a GUID' -and -not (Test-Path $guidCfg)) {
+        Ok 'guid rejects a value that does not parse, exits 1, writes nothing'
+    } else { No 'guid rejects a value that does not parse, exits 1, writes nothing' "exit=$($r.Code) $($r.Out)" }
+
+    # An existing config keeps every other byte: key order, the 2-space indent the
+    # daemon writes, and a _comment member a user may have added. A ConvertFrom-Json /
+    # ConvertTo-Json round-trip would re-indent to 4 spaces and truncate nested objects
+    # at PS 5.1's default -Depth of 2, which is exactly why this is a text splice.
+    $original = "{`n  `"Enabled`": true,`n  `"ApiGuid`": `"`",`n  `"_comment`": `"KEEP ME`",`n  `"Port`": 17321,`n  `"Devices`": [`n    { `"Name`": `"Strip`", `"States`": { `"Idle`": { `"Color`": `"#111111`" } } }`n  ]`n}`n"
+    [System.IO.File]::WriteAllText($guidCfg, $original)
+    $r = Invoke-CliScratch @('guid', $value, '--no-restart')
+    $after = [System.IO.File]::ReadAllText($guidCfg)
+    $expected = $original.Replace('"ApiGuid": ""', '"ApiGuid": "' + $value + '"')
+    if ($r.Code -eq 0 -and $after -eq $expected) { Ok 'guid replaces the ApiGuid value and leaves every other byte alone' }
+    else { No 'guid replaces the ApiGuid value and leaves every other byte alone' "exit=$($r.Code)`n$($r.Out)`n--- file:`n$after" }
+    if ($r.Out -match [regex]::Escape($guidCfg)) { Ok 'guid reports the file it wrote' }
+    else { No 'guid reports the file it wrote' $r.Out }
+
+    # A second write must replace, not append or double up.
+    $value2 = 'ffffffff-1111-4222-8333-444444444444'
+    $r = Invoke-CliScratch @('guid', $value2, '--no-restart')
+    $after = [System.IO.File]::ReadAllText($guidCfg)
+    if ($after -eq $original.Replace('"ApiGuid": ""', '"ApiGuid": "' + $value2 + '"')) { Ok 'guid overwrites a GUID that is already set' }
+    else { No 'guid overwrites a GUID that is already set' $after }
+
+    # No config at all - the daemon has never run. The daemon fills every missing key
+    # from its own defaults (JavaScriptSerializer keeps property initialisers), so a
+    # file holding only the GUID is a complete first config.
+    Remove-Item $guidCfg
+    $r = Invoke-CliScratch @('guid', $value, '--no-restart')
+    $created = $null
+    try { $created = Get-Content $guidCfg -Raw | ConvertFrom-Json } catch { }
+    if ($r.Code -eq 0 -and $created -and $created.ApiGuid -eq $value) { Ok 'guid creates config.json when there is none' }
+    else { No 'guid creates config.json when there is none' "exit=$($r.Code) $($r.Out)" }
+
+    # A config that has the key on a line of its own but no value yet - the shape the
+    # daemon's first run writes - and one with the key missing entirely both land.
+    [System.IO.File]::WriteAllText($guidCfg, "{`n  `"Enabled`": true`n}`n")
+    $r = Invoke-CliScratch @('guid', $value, '--no-restart')
+    $created = $null
+    try { $created = Get-Content $guidCfg -Raw | ConvertFrom-Json } catch { }
+    if ($r.Code -eq 0 -and $created -and $created.ApiGuid -eq $value -and $created.Enabled -eq $true) { Ok 'guid inserts the key into a config that lacks it' }
+    else { No 'guid inserts the key into a config that lacks it' "exit=$($r.Code) $($r.Out)`n$(Get-Content $guidCfg -Raw)" }
+
+    # doctor is where a first-time user lands; with no GUID it must name the fix.
+    [System.IO.File]::WriteAllText($guidCfg, "{`n  `"ApiGuid`": `"`"`n}`n")
+    $r = Invoke-CliScratch @('doctor')
+    if ($r.Out -match '/govee guid') { Ok 'doctor points at /govee guid when the GUID is missing' }
+    else { No 'doctor points at /govee guid when the GUID is missing' $r.Out }
+} finally {
+    $env:LOCALAPPDATA = $savedLocalAppData
+    Remove-Item $guidScratch -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'

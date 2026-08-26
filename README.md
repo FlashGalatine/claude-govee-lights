@@ -49,10 +49,13 @@ hook, it is `async`, and it always exits 0.
 ## Setup
 
 ```powershell
-# 1. Build and start the daemon
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Build.ps1 -Restart
+# 1. Build the daemon
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Build.ps1
 
-# 2. Confirm it can see your lights
+# 2. Give it your API GUID (Govee Desktop ▸ Settings ▸ API) - this also starts the daemon
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 guid <your-guid>
+
+# 3. Confirm it can see your lights
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Govee-Cli.ps1 doctor
 ```
 
@@ -63,8 +66,13 @@ Then install the plugin in Claude Code:
 /plugin install claude-govee-lights
 ```
 
+Once it is installed, `/govee guid <value>` does step 2 from inside Claude Code, and
+`/govee doctor` tells you when the GUID is the thing missing.
+
 Config lives at `%LOCALAPPDATA%\ClaudeGovee\config.json` and is written with defaults on
-first run, seeded with the GUID from `Govee-API-GUID.txt`. It hot-reloads on save.
+first run. `/govee guid` writes the GUID into it (a `Govee-API-GUID.txt` in the repo
+root is also picked up on first run, which is handy when developing). It hot-reloads on
+save.
 
 ## Commands
 
@@ -76,6 +84,7 @@ first run, seeded with the GUID from `Govee-API-GUID.txt`. It hot-reloads on sav
 /govee restart    restart the daemon
 /govee logs       tail the daemon log
 /govee doctor     diagnose a broken setup
+/govee guid <v>   save the API GUID from Govee Desktop ▸ Settings ▸ API and start the daemon
 /govee styles     show every state's colour and effect, and its source
 /govee set        change a state's style — applies live, unsaved until save
 /govee preview    try a style on the lights for a few seconds, unsaved

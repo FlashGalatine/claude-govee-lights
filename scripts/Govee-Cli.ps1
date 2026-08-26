@@ -188,6 +188,47 @@ function Call {
     }
 }
 
+# Stop whatever is listening, start a fresh daemon through Ensure-Daemon, and return
+# the new /health document - or $null if nothing answered. Shared by 'restart' and
+# 'guid'; when nothing was running the shutdown call simply finds no one to tell.
+function Restart-Daemon {
+    Call '/shutdown' 'Post' | Out-Null
+    Start-Sleep -Milliseconds 1200
+    $ensure = Join-Path $PSScriptRoot 'Ensure-Daemon.ps1'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $ensure | Out-Null
+    Start-Sleep -Seconds 2
+    return (Call '/health')
+}
+
+# Write the API GUID into config.json as a text splice. The daemon reads the file with
+# JavaScriptSerializer and writes it back through its own pretty-printer, and users
+# add _comment members by hand; a ConvertFrom-Json/ConvertTo-Json round-trip here
+# would re-indent to four spaces and, on PowerShell 5.1, truncate Devices[].States at
+# the default -Depth of 2. Replacing one value in place keeps every other byte.
+# Property names are case-insensitive to the daemon, so the match is too.
+function Set-ConfigGuid {
+    param([string] $Path, [string] $Value)
+    $text = if (Test-Path $Path) { [System.IO.File]::ReadAllText($Path) } else { "{`n}`n" }
+    $m = [regex]::Match($text, '(?i)("ApiGuid"\s*:\s*")[^"]*(")')
+    if ($m.Success) {
+        $text = $text.Substring(0, $m.Index) + $m.Groups[1].Value + $Value + $m.Groups[2].Value +
+                $text.Substring($m.Index + $m.Length)
+    } else {
+        $brace = $text.IndexOf('{')
+        if ($brace -lt 0) { throw "$Path does not look like a JSON object; fix or delete it and try again." }
+        $body = $text.Substring($brace + 1)
+        # Borrow the file's own indent from its first indented member; two spaces is
+        # what the daemon writes and what a brand-new file gets.
+        $indentMatch = [regex]::Match($body, '(?m)^([ \t]+)"')
+        $indent = if ($indentMatch.Success) { $indentMatch.Groups[1].Value } else { '  ' }
+        $comma = if ($body -match '^\s*"') { ',' } else { '' }
+        $text = $text.Substring(0, $brace + 1) + "`n" + $indent + '"ApiGuid": "' + $Value + '"' + $comma + $body
+    }
+    $dir = Split-Path $Path -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($Path, $text)
+}
+
 function Show-CallFailure {
     if ($script:LastErrorBody) {
         # This is the daemon's own message, not "nothing is running" - it answered.
@@ -287,14 +328,45 @@ switch ($Command.ToLowerInvariant()) {
     }
 
     'restart' {
-        Call '/shutdown' 'Post' | Out-Null
-        Start-Sleep -Milliseconds 1200
-        $ensure = Join-Path $PSScriptRoot 'Ensure-Daemon.ps1'
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $ensure | Out-Null
-        Start-Sleep -Seconds 2
-        $h = Call '/health'
+        $h = Restart-Daemon
         if ($h) { Write-Output "Restarted. govee=$($h.goveeState) pid=$($h.pid)" }
         else { Write-Output "Restart failed - see logs." }
+    }
+
+    'guid' {
+        # The one verb that cannot go through the daemon: a missing GUID is the single
+        # condition under which it refuses to run (no_guid, exit 2), so on the very
+        # first setup nothing is listening to take a request.
+        $noRestart = $false
+        $positional = @()
+        if ($Rest) {
+            foreach ($a in $Rest) {
+                if ($a -ieq '--no-restart') { $noRestart = $true } else { $positional += $a }
+            }
+        }
+        if ($positional.Count -lt 1) {
+            Write-Output "Usage: /govee guid <value> [--no-restart]"
+            Write-Output ""
+            Write-Output "The value is in Govee Desktop under Settings > API. It is written to config.json"
+            Write-Output "and the daemon is restarted so it takes effect."
+            break
+        }
+        $value = $positional[0].Trim()
+        $ignored = [Guid]::Empty
+        if (-not [Guid]::TryParse($value, [ref]$ignored)) {
+            throw "'$value' is not a GUID. Copy it from Govee Desktop > Settings > API."
+        }
+        $cfgPath = Join-Path $env:LOCALAPPDATA 'ClaudeGovee\config.json'
+        Set-ConfigGuid $cfgPath $value
+        Write-Output "Saved API GUID to $cfgPath."
+        if ($noRestart) { break }
+
+        $h = Restart-Daemon
+        if ($h) { Write-Output "Daemon started. govee=$($h.goveeState) pid=$($h.pid) - '/govee doctor' to check it sees your lights." }
+        else {
+            Write-Output "The daemon did not come up. If it has not been built yet, run Build.ps1 -Restart;"
+            Write-Output "otherwise '/govee logs' says why."
+        }
     }
 
     'logs' {
@@ -350,11 +422,16 @@ switch ($Command.ToLowerInvariant()) {
 
         $cfgPath = Join-Path $env:LOCALAPPDATA 'ClaudeGovee\config.json'
         Write-Output ("  Config                   : {0}" -f $cfgPath)
+        $guidHint = "     ^ run '/govee guid <value>' with the GUID from Govee Desktop > Settings > API."
         if (Test-Path $cfgPath) {
             try {
                 $c = Get-Content $cfgPath -Raw | ConvertFrom-Json
                 Write-Output ("  apiGuid set              : {0}" -f [bool]$c.ApiGuid)
+                if (-not $c.ApiGuid) { Write-Output $guidHint }
             } catch { Write-Output "  Config is not valid JSON." }
+        } else {
+            Write-Output "  apiGuid set              : False (no config yet)"
+            Write-Output $guidHint
         }
     }
 
@@ -620,6 +697,7 @@ switch ($Command.ToLowerInvariant()) {
         Write-Output "  restart   restart the daemon"
         Write-Output "  logs      tail the daemon log"
         Write-Output "  doctor    diagnose a broken setup"
+        Write-Output "  guid <v>  save the API GUID from Govee Desktop > Settings > API and start the daemon"
         Write-Output "  styles    show every state's colour and effect"
         Write-Output "  set       change a state, e.g. set Thinking --color FF0000 --hz 2"
         Write-Output "  preview   try a style for a few seconds without changing anything"
