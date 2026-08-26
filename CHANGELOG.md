@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-26
+
 ### Added
 - `/govee guid <value>` writes the Govee Desktop API GUID into `config.json` and
   starts the daemon, so first-time setup no longer needs a hand-edited file. It is
@@ -86,7 +90,8 @@ The style engine: composable effects.
 - Lights stayed dark after a reboot until `/govee refresh`.
 - The daemon could idle out mid-session and never come back.
 
-[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/1ca0e22...HEAD
+[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/1ca0e22...v0.4.0
 [0.3.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/3d1f2be...1ca0e22
 [0.2.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/12113da...3d1f2be
 [0.1.0]: https://github.com/FlashGalatine/claude-govee-lights/commits/3a4040f

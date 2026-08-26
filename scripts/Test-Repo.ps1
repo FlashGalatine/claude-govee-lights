@@ -68,6 +68,22 @@ if ($parsed['.claude-plugin/plugin.json'] -and $parsed['.claude-plugin/marketpla
 
     if ($parsed['.claude-plugin/plugin.json'].version) { Ok 'plugin.json declares a version' $parsed['.claude-plugin/plugin.json'].version }
     else { No 'plugin.json declares a version' }
+
+    # One version, three homes: plugin.json is what Claude Code installs, the
+    # marketplace entry is what makes an installed copy refresh, and the csproj is
+    # what /health and the log report. Bumping one and forgetting another is the
+    # release-day drift this guards.
+    $pluginVersion = [string]$parsed['.claude-plugin/plugin.json'].version
+    $marketEntry = @($parsed['.claude-plugin/marketplace.json'].plugins) | Where-Object { $_.name -eq $pluginName } | Select-Object -First 1
+    $marketVersion = if ($marketEntry) { [string]$marketEntry.version } else { '' }
+    $csproj = Get-Content (Join-Path $root 'src/GoveeLights.Daemon/GoveeLights.Daemon.csproj') -Raw
+    $csprojVersion = [regex]::Match($csproj, '<Version>([^<]+)</Version>').Groups[1].Value
+    if ($pluginVersion -and $pluginVersion -eq $marketVersion -and $pluginVersion -eq $csprojVersion) {
+        Ok 'plugin.json, marketplace.json and the csproj agree on the version' $pluginVersion
+    } else {
+        No 'version drift between plugin.json, marketplace.json and the csproj' `
+           "plugin.json=$pluginVersion marketplace=$marketVersion csproj=$csprojVersion"
+    }
 }
 
 # ---------------------------------------------------------------------- hooks
