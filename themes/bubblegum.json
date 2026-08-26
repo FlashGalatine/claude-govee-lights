@@ -1,0 +1,20 @@
+{
+  "Name": "bubblegum",
+  "Description": "Pastel - cotton-candy pink, mint, lavender and lemon; slow soft sparkles",
+  "States": {
+    "Idle":        { "Color": "#3A2438", "Effect": "breathe", "Hz": 0.1, "Brightness": 20 },
+    "Thinking":    { "Color": "#FFB7D5", "Effect": "sparkle", "Hz": 1.5, "Brightness": 55, "Color2": "#7A3A5A" },
+    "ToolRead":    { "Color": "#B8F0E0", "Effect": "sparkle", "Hz": 2.0, "Brightness": 55, "Color2": "#3C6E60" },
+    "ToolEdit":    { "Color": "#C9B6FF", "Effect": "sparkle", "Hz": 2.0, "Brightness": 60, "Color2": "#4E3F80" },
+    "ToolShell":   { "Color": "#FFD1A6", "Effect": "sparkle", "Hz": 2.5, "Brightness": 60, "Color2": "#8A5A3A" },
+    "ToolWeb":     { "Color": "#A6D8FF", "Effect": "sparkle", "Hz": 2.0, "Brightness": 55, "Color2": "#3A5A80" },
+    "ToolMcp":     { "Color": "#E0B6FF", "Effect": "sparkle", "Hz": 2.0, "Brightness": 55, "Color2": "#5E3F80" },
+    "ToolAgent":   { "Color": "#FFB7D5", "Effect": "comet", "Hz": 0.6, "Brightness": 65, "Color2": "#A6D8FF", "Tail": 2.5 },
+    "ToolOther":   { "Color": "#FFF3FA", "Effect": "solid", "Hz": 0.5, "Brightness": 50 },
+    "Compacting":  { "Color": "#B8F0E0", "Effect": "breathe", "Hz": 0.5, "Brightness": 55 },
+    "WaitingUser": { "Color": "#FFF3A6", "Effect": "pulse", "Hz": 1.2, "Brightness": 90 },
+    "Error":       { "Color": "#FF8FA3", "Effect": "blink", "Hz": 2.5, "Brightness": 100 },
+    "Done":        { "Color": "#FFB7D5", "Effect": "sparkle", "Hz": 4.0, "Brightness": 70, "Color2": "#B8F0E0" },
+    "Offline":     { "Color": "#7A3A5A", "Effect": "solid", "Hz": 0.0, "Brightness": 30 }
+  }
+}
