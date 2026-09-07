@@ -49,9 +49,12 @@ function Send-Payload {
 }
 
 try {
-    # Already up: the parallel http hook for this same event is delivering the
-    # payload, so forwarding here would double-post. Just confirm and leave.
-    if (Test-Daemon) { exit 0 }
+    # SessionStart has no parallel HTTP hook, so register warm sessions here too.
+    # UserPromptSubmit already has an HTTP sender and must not be double-posted.
+    if (Test-Daemon) {
+        if ($payload -and ($payload | ConvertFrom-Json).hook_event_name -eq 'SessionStart') { Send-Payload }
+        exit 0
+    }
 
     # Locate the executable: published output first, then a dev build.
     $root = if ($env:CLAUDE_PLUGIN_ROOT) { $env:CLAUDE_PLUGIN_ROOT } else { Split-Path $PSScriptRoot -Parent }
@@ -63,7 +66,7 @@ try {
     $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
     if (-not $exe) {
-        Write-Error "GoveeLightsDaemon.exe not found. Run scripts\Build.ps1 first."
+        Write-Error "GoveeLightsDaemon.exe not found. Run scripts\Build.ps1 first." -ErrorAction Continue
         exit 0    # deliberately not 2 - a missing daemon must not break Claude Code
     }
 
@@ -75,10 +78,10 @@ try {
         Start-Sleep -Milliseconds 250
     }
 
-    Write-Error "Daemon did not become healthy within ${StartTimeoutSec}s."
+    Write-Error "Daemon did not become healthy within ${StartTimeoutSec}s." -ErrorAction Continue
 } catch {
     # Swallow everything. Ambient lighting is never worth interrupting a session for.
-    Write-Error "Ensure-Daemon failed: $($_.Exception.Message)"
+    Write-Error "Ensure-Daemon failed: $($_.Exception.Message)" -ErrorAction Continue
 }
 
 exit 0

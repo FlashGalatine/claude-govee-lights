@@ -1,4 +1,4 @@
-# Claude Govee Lights
+# Govee Lights for Claude Code and Codex
 
 [![CI](https://github.com/FlashGalatine/claude-govee-lights/actions/workflows/ci.yml/badge.svg)](https://github.com/FlashGalatine/claude-govee-lights/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -6,6 +6,11 @@
 Your Govee lights react to what Claude Code is doing — dim blue when idle, purple
 breathing while it thinks, a coloured chase across the segments while it runs a tool,
 and an urgent amber pulse when it is waiting on you.
+
+**Codex is also supported on Windows.** Build its separate package with
+`scripts/Build-CodexPlugin.ps1`, then follow [the Codex setup guide](docs/CODEX.md).
+Both integrations share the daemon, settings, and themes. The Claude Code setup
+and `/govee` commands below continue to work; Codex uses the `$govee` skill.
 
 ```
 idle ──▶ thinking ──▶ tool ──▶ thinking ──▶ done ──▶ idle
@@ -267,6 +272,7 @@ govee_init_failed                            Govee Desktop is gone or elevated
 
 ```
 .claude-plugin/    plugin manifest + the marketplace that serves it
+codex/govee-lights/ Codex plugin template (package with Build-CodexPlugin.ps1)
 hooks/hooks.json   the Claude Code integration contract
 commands/govee.md  the /govee slash command
 scripts/           build, launcher, CLI, probes, demo

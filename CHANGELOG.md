@@ -6,6 +6,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Codex support alongside Claude Code: a separate plugin package, `$govee` skill,
+  lifecycle bridge, and hardware-free tests. Both hosts share the daemon and settings.
+- `scripts/Build-CodexPlugin.ps1` stages an installable Codex package without stopping
+  the running daemon. See `docs/CODEX.md` for installation and event coverage.
+
+### Fixed
+- Warm Claude sessions now register through their SessionStart bootstrap.
+- Launcher diagnostics no longer turn a lighting failure into a nonzero hook exit.
+- Fast tool calls now reach the completion flourish and idle after a turn stops,
+  while preserving the current tool's minimum display time and any error flourish.
+
 ### Changed
 - The marketplace is named `claude-govee-lights` rather than
   `claude-govee-lights-local`, so the install command is

@@ -1,0 +1,32 @@
+{
+  "name": "govee-lights",
+  "version": "0.4.0",
+  "description": "Govee activity lights for Codex on Windows, sharing the Claude Code daemon and settings.",
+  "author": {
+    "name": "DrawF"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "keywords": [
+    "govee",
+    "lights",
+    "ambient",
+    "status",
+    "hooks"
+  ],
+  "interface": {
+    "displayName": "Govee Lights",
+    "shortDescription": "Let Govee lights react to Codex activity.",
+    "longDescription": "Local activity lights for prompts, tools, approvals and completed turns, with shared themes and controls for Claude Code and Codex. Requires Windows and Govee Desktop.",
+    "developerName": "DrawF",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check my Govee lights setup.",
+      "Show my Govee light styles."
+    ],
+    "brandColor": "#7B4DFF"
+  }
+}

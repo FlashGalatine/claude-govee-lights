@@ -1,0 +1,136 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([IO.Path]::Combine([Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'scripts/Codex-Hook.ps1'))\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

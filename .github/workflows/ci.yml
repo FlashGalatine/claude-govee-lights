@@ -39,6 +39,14 @@ jobs:
       - name: Restore
         run: dotnet restore src/GoveeLights.Daemon/GoveeLights.Daemon.csproj
 
+      - name: Verify both hosts' activity mappings and Codex bridge
+        shell: powershell
+        run: |
+          ./scripts/Test-HookMapper.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/Test-CodexHooks.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build
         run: dotnet build src/GoveeLights.Daemon/GoveeLights.Daemon.csproj -c Release --no-restore -warnaserror
 
@@ -103,6 +111,18 @@ jobs:
           path: dist/daemon/
           retention-days: 14
 
+      - name: Package Codex plugin
+        shell: powershell
+        run: ./scripts/Build-CodexPlugin.ps1 -SkipBuild
+
+      - name: Upload Codex plugin
+        uses: actions/upload-artifact@v5
+        with:
+          name: govee-lights-codex
+          path: dist/codex/govee-lights/
+          include-hidden-files: true
+          retention-days: 14
+
   plugin:
     name: Validate plugin manifest
     runs-on: ubuntu-latest
@@ -116,7 +136,9 @@ jobs:
         run: |
           set -euo pipefail
           for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json \
-                   hooks/hooks.json config/config.example.json; do
+                   hooks/hooks.json config/config.example.json \
+                   codex/govee-lights/.codex-plugin/plugin.json \
+                   codex/govee-lights/hooks/hooks.json; do
             python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
             echo "ok   $f"
           done
@@ -148,4 +170,21 @@ jobs:
               print("Unknown hook events: " + ", ".join(bad), file=sys.stderr)
               sys.exit(1)
           print(f"ok   {len(hooks)} hook events, all recognised")
+
+          codex = json.load(open("codex/govee-lights/hooks/hooks.json"))["hooks"]
+          codex_known = {
+              "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "Interrupt",
+              "PreToolUse", "PostToolUse", "PermissionRequest", "PreCompact",
+              "PostCompact", "SubagentStart", "SubagentStop",
+          }
+          if set(codex) - codex_known:
+              sys.exit("Unknown Codex hook events: " + str(sorted(set(codex) - codex_known)))
+          for event, groups in codex.items():
+              for group in groups:
+                  for hook in group["hooks"]:
+                      if hook["type"] != "command":
+                          sys.exit(f"Unsupported Govee Codex hook handler: {event}")
+                      if not 0 < hook["timeout"] <= (3 if event in {"Interrupt", "SessionEnd"} else 10):
+                          sys.exit(f"Invalid Govee hook timeout: {event}")
+          print(f"ok   {len(codex)} Codex hook events, all recognised")
           PY

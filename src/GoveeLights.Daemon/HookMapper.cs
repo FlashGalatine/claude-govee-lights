@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace GoveeLights
 {
-    /// <summary>Translates Claude Code hook events into activity states.</summary>
+    /// <summary>Translates Claude Code and normalized Codex hook events into activity states.</summary>
     public class HookMapper
     {
         readonly SessionStore _sessions;
@@ -11,7 +11,6 @@ namespace GoveeLights
 
         static readonly TimeSpan ErrorSticky = TimeSpan.FromMilliseconds(2500);
         static readonly TimeSpan StopFailSticky = TimeSpan.FromSeconds(10);
-        static readonly TimeSpan DoneSticky = TimeSpan.FromSeconds(2);
         static readonly TimeSpan WaitingSticky = TimeSpan.FromMinutes(15);
 
         public HookMapper(SessionStore sessions, Dictionary<string, string> toolClassOverrides)
@@ -23,7 +22,16 @@ namespace GoveeLights
                 { "Edit", "edit" }, { "MultiEdit", "edit" }, { "Write", "edit" }, { "NotebookEdit", "edit" },
                 { "Read", "read" }, { "Glob", "read" }, { "Grep", "read" }, { "NotebookRead", "read" },
                 { "WebFetch", "web" }, { "WebSearch", "web" },
-                { "Task", "agent" }, { "Agent", "agent" }, { "SendMessage", "agent" }, { "Workflow", "agent" }
+                { "Task", "agent" }, { "Agent", "agent" }, { "SendMessage", "agent" }, { "Workflow", "agent" },
+                { "exec_command", "shell" }, { "shell", "shell" }, { "shell_command", "shell" },
+                { "local_shell", "shell" }, { "write_stdin", "shell" },
+                { "apply_patch", "edit" },
+                { "read_file", "read" }, { "list_dir", "read" }, { "grep_files", "read" }, { "view_image", "read" },
+                { "web", "web" }, { "web.run", "web" }, { "web__run", "web" },
+                { "spawn_agent", "agent" }, { "send_message", "agent" }, { "wait_agent", "agent" },
+                { "wait", "agent" }, { "close_agent", "agent" }, { "resume_agent", "agent" },
+                { "followup_task", "agent" }, { "list_agents", "agent" }, { "interrupt_agent", "agent" },
+                { "request_user_input", "waiting" }, { "request_user_input_async", "waiting" }
             };
             if (toolClassOverrides != null)
                 foreach (var kv in toolClassOverrides) _toolClasses[kv.Key] = kv.Value;
@@ -44,6 +52,16 @@ namespace GoveeLights
             }
 
             var s = _sessions.GetOrAdd(sessionId, cwd);
+
+            if (Eq(name, "Interrupt"))
+            {
+                // Cancellation ends the turn immediately. Replacing this session clears
+                // minimum-hold, sticky, pending and subagent state through the store's
+                // locked methods, so a queued transition cannot revive cancelled work.
+                _sessions.Remove(sessionId);
+                _sessions.GetOrAdd(sessionId, string.IsNullOrEmpty(cwd) ? s.Cwd : cwd);
+                return;
+            }
 
             switch (h)
             {
@@ -67,7 +85,8 @@ namespace GoveeLights
 
             if (Eq(name, "PreToolUse"))
             {
-                _sessions.Set(s, ClassifyTool(toolName));
+                var activity = ClassifyTool(toolName);
+                _sessions.Set(s, activity, activity == Activity.WaitingUser ? (TimeSpan?)WaitingSticky : null);
                 return;
             }
 
@@ -86,8 +105,7 @@ namespace GoveeLights
 
             if (Eq(name, "Stop"))
             {
-                s.SubagentDepth = 0;
-                _sessions.Set(s, Activity.Done, DoneSticky);
+                _sessions.Complete(s);
                 return;
             }
 
@@ -129,16 +147,22 @@ namespace GoveeLights
                 case "web": return Activity.ToolWeb;
                 case "agent": return Activity.ToolAgent;
                 case "mcp": return Activity.ToolMcp;
+                case "waiting": return Activity.WaitingUser;
                 default: return Activity.ToolOther;
             }
         }
 
         /// <summary>Events that prove a permission prompt is no longer waiting on the user.</summary>
-        static bool IsWaitingResolver(string name) =>
-            Eq(name, "PreToolUse") || Eq(name, "PostToolUse") || Eq(name, "PostToolBatch") ||
-            Eq(name, "PostToolUseFailure") || Eq(name, "PermissionDenied") ||
-            Eq(name, "UserPromptSubmit") || Eq(name, "Stop") || Eq(name, "StopFailure");
+        static bool IsWaitingResolver(string name)
+        {
+            return Eq(name, "PreToolUse") || Eq(name, "PostToolUse") || Eq(name, "PostToolBatch") ||
+                Eq(name, "PostToolUseFailure") || Eq(name, "PermissionDenied") ||
+                Eq(name, "UserPromptSubmit") || Eq(name, "Stop") || Eq(name, "StopFailure");
+        }
 
-        static bool Eq(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        static bool Eq(string a, string b)
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
     }
 }
