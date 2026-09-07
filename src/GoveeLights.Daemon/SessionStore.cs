@@ -109,12 +109,18 @@ namespace GoveeLights
                 // a latched state would look idle and get evicted by the TTL sweep.
                 s.LastEventAt = now;
 
-                // A latched state wins unless the newcomer outranks it.
-                if (now < s.StickyUntil && (int)next < (int)s.State) return;
-
-                // A brand-new state must not displace one that has not been visible yet,
-                // unless it is more important.
-                if (now < s.MinUntil && (int)next < (int)s.State) return;
+                // Preserve a latched state or a tool that has not been visible yet,
+                // unless the newcomer outranks it. New activity still supersedes a
+                // queued completion, even when it must wait for that same hold.
+                if ((now < s.StickyUntil || now < s.MinUntil) && (int)next < (int)s.State)
+                {
+                    if (s.Pending == Activity.Done)
+                    {
+                        s.Pending = next;
+                        s.PendingAt = s.MinUntil > s.StickyUntil ? s.MinUntil : s.StickyUntil;
+                    }
+                    return;
+                }
 
                 s.Pending = null;
                 s.PendingAt = DateTime.MaxValue;
@@ -139,6 +145,31 @@ namespace GoveeLights
                 s.Pending = next;
                 s.PendingAt = DateTime.UtcNow + SettleDelay;
                 s.LastEventAt = DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>Finish a turn after any visible tool hold or error flourish.
+        /// Completion replaces a pending return to Thinking; a later prompt or tool
+        /// can still cancel it through Set. The mapper releases a waiting-user latch
+        /// before calling this, so answering or stopping never waits fifteen minutes.</summary>
+        public void Complete(SessionState s)
+        {
+            lock (_gate)
+            {
+                var now = DateTime.UtcNow;
+                s.LastEventAt = now;
+                s.SubagentDepth = 0;
+                var completeAt = s.MinUntil > now ? s.MinUntil : now;
+                if (s.StickyUntil > completeAt) completeAt = s.StickyUntil;
+
+                if (completeAt <= now)
+                {
+                    Set(s, Activity.Done);
+                    return;
+                }
+
+                s.Pending = Activity.Done;
+                s.PendingAt = completeAt;
             }
         }
 

@@ -43,6 +43,8 @@ Section 'JSON'
 $jsonFiles = @(
     '.claude-plugin/plugin.json',
     '.claude-plugin/marketplace.json',
+    'codex/govee-lights/.codex-plugin/plugin.json',
+    'codex/govee-lights/hooks/hooks.json',
     'hooks/hooks.json',
     'config/config.example.json'
 )
@@ -90,6 +92,9 @@ if ($parsed['.claude-plugin/plugin.json'] -and $parsed['.claude-plugin/marketpla
     # what /health and the log report. Bumping one and forgetting another is the
     # release-day drift this guards.
     $pluginVersion = [string]$parsed['.claude-plugin/plugin.json'].version
+    $codexVersion = [string]$parsed['codex/govee-lights/.codex-plugin/plugin.json'].version
+    if ($codexVersion -eq $pluginVersion) { Ok 'Codex and Claude plugins agree on the version' $codexVersion }
+    else { No 'Codex and Claude plugin version mismatch' "Codex=$codexVersion Claude=$pluginVersion" }
     $marketEntry = @($parsed['.claude-plugin/marketplace.json'].plugins) | Where-Object { $_.name -eq $pluginName } | Select-Object -First 1
     $marketVersion = if ($marketEntry) { [string]$marketEntry.version } else { '' }
     $csproj = Get-Content (Join-Path $root 'src/GoveeLights.Daemon/GoveeLights.Daemon.csproj') -Raw
