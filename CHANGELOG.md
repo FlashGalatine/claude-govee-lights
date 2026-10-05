@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] - 2026-10-05
+
 ### Added
 - The daemon heals a rejected API GUID by itself. When Govee Desktop rejects the GUID in
   use (a fast `1001`), the daemon tries every other GUID it knows on that same attempt:
@@ -134,7 +138,8 @@ The style engine: composable effects.
   `System.Runtime.CompilerServices.Unsafe` binding redirect, without which every
   Govee call times out with a bogus GUID error.
 
-[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.1.1...v0.2.0
