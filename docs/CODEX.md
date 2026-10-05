@@ -79,7 +79,20 @@ run the packaged `scripts/Govee-Cli.ps1 guid <value>` with the GUID from Govee
 Desktop's Settings > API, then `doctor`. Keep Govee Desktop running normally.
 
 If an older daemon is already running, restart it once with `$govee restart` to
-load the new Codex tool mappings. That restarts the shared daemon for both hosts.
+load the new Codex tool mappings and GUID recovery. That restarts the shared daemon
+for both hosts. Installing a new package does not replace an already running daemon;
+`$govee status` must report version 0.5.0 or newer for GUID recovery to be active.
+
+Version 0.5.0 uses the same GUID recovery in both hosts. On a fast GUID rejection,
+the daemon tries the current config, the `Govee-API-GUID.txt` seeds, and
+`known-guids.txt` (the last five GUIDs Govee Desktop accepted). `$govee guid <value>`
+updates both the config and its adjacent seed. `$govee doctor` reports when the
+configured GUID is rejected and a fallback is keeping the lights connected. The
+slow binding-redirect timeout never triggers a GUID swap.
+
+Keep both installed host packages current: after the shared daemon exits, whichever
+host starts it first supplies the executable. An older Claude package can therefore
+start an older daemon even when the Codex package has been updated.
 
 ## Activity coverage
 
@@ -123,8 +136,12 @@ the shared daemon configuration and Claude HTTP hooks.
 scripts\Test-HookMapper.ps1
 scripts\Test-CodexHooks.ps1
 scripts\Test-Repo.ps1
+scripts\Test-GuidSelfHeal.ps1 -Exe dist\codex\govee-lights\dist\daemon\GoveeLightsDaemon.exe
 ```
 
 The mapper tests cover both hosts and cancellation. The bridge tests use mocks
 and a disposable loopback server, never the real daemon. Physical behavior still
 needs a live Codex session with trusted hooks and Govee Desktop running.
+The GUID recovery suite uses the packaged executable and an isolated config on a
+separate port against Govee Desktop. Its unmatched test device prevents it from
+sending commands to the real lights. It skips when Govee Desktop is unavailable.

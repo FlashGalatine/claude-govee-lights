@@ -116,8 +116,16 @@ namespace GoveeLights
 
         // ---- loading -------------------------------------------------------------
 
+        /// <summary>Test-only escape hatch, same shape as Themes.UserDirOverride: null in
+        /// production. Set via --config-dir so Test-GuidSelfHeal.ps1 can run an isolated
+        /// daemon - its own config, seed, themes and logs - beside the real one. Setting
+        /// %LOCALAPPDATA% does not work for this: GetFolderPath resolves through the
+        /// Known Folder API, not the environment variable. Internal - nothing but the
+        /// harness may set it.</summary>
+        internal static string DirOverride;
+
         public static string DefaultDir =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeGovee");
+            DirOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeGovee");
 
         public static string DefaultPath => Path.Combine(DefaultDir, "config.json");
 

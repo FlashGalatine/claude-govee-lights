@@ -13,10 +13,37 @@ All notable changes to this project are recorded here. The format follows
   the running daemon. See `docs/CODEX.md` for installation and event coverage.
 
 ### Fixed
+- The Codex package now includes the shared 0.5.0 GUID recovery and fallback diagnostics.
 - Warm Claude sessions now register through their SessionStart bootstrap.
 - Launcher diagnostics no longer turn a lighting failure into a nonzero hook exit.
 - Fast tool calls now reach the completion flourish and idle after a turn stops,
   while preserving the current tool's minimum display time and any error flourish.
+
+## [0.5.0] - 2026-10-05
+
+### Added
+- The daemon heals a rejected API GUID by itself. When Govee Desktop rejects the GUID in
+  use (a fast `1001`), the daemon tries every other GUID it knows on that same attempt:
+  `config.json`'s first, then each `Govee-API-GUID.txt` seed (beside `config.json`, then
+  up from the exe), then `known-guids.txt`, the last five GUIDs Desktop accepted. If one
+  connects, `/health` and `/status` report `usingFallbackGuid`, and `/govee doctor` says
+  `config.json`'s GUID is wrong. Nothing is sticky: every connection attempt re-checks
+  the whole list, so at the next reconnect or restart the daemon goes back to
+  `config.json`'s GUID (`govee_guid_config_restored`) if Govee Desktop accepts it again.
+  `config.json`'s GUID is read live, so a GUID pasted into it by hand connects without a
+  restart, and fixing it clears `usingFallbackGuid` at once. The history is what heals
+  a GUID that flips and flips back, even after `/govee guid` has overwritten config and
+  seed with the short-lived value. The slow (~6 s) `1001`, which is the missing
+  bindingRedirect, never triggers a swap. Log lines name the fix that matches the
+  timing: the bindingRedirect for a slow `1001`, and for code `100`, elevation only when
+  it is fast; a slow `100` is Desktop still starting. CI checks those rules, and that
+  `config.json`'s GUID is tried first, through a new headless `--dump-guid-gate` mode.
+- `/govee guid` also writes the seed beside `config.json`, so a config that is later
+  overwritten with a bad GUID heals on its own.
+- `/status` counts consecutive connection failures (`govee.initFailures`).
+- `scripts/Test-GuidSelfHeal.ps1`: a hardware-gated integration test that runs an
+  isolated daemon against the real Govee Desktop. It skips cleanly when no Govee Desktop
+  is present.
 
 ### Changed
 - The marketplace is named `claude-govee-lights` rather than
@@ -25,6 +52,17 @@ All notable changes to this project are recorded here. The format follows
   old name must remove it and add the marketplace again.
 - Every release is tagged (`v0.1.0` … `v0.4.0`) and the changelog links compare
   between tags.
+- A `config.json` whose `ApiGuid` is empty now starts from the seed when one exists,
+  instead of refusing. With no seed the daemon still exits with code 2.
+
+### Fixed
+- A rejected GUID no longer fails quietly. Every retry used to log a WARN (about once a
+  minute), which buried the one line that mattered, and a real outage went unnoticed for
+  about two weeks. The first failure is now an ERROR that names the fix; an unchanged
+  failure repeats at most every 15 minutes. Logs show only the last four characters of a
+  GUID, never the whole credential.
+- `docs/API-NOTES.md` said a `1001` after ~6 s meant a bad GUID. A wrong GUID is
+  rejected in ~15–30 ms; the ~6 s `1001` is the missing bindingRedirect.
 
 ## [0.4.0] - 2026-08-26
 
@@ -111,7 +149,8 @@ The style engine: composable effects.
   `System.Runtime.CompilerServices.Unsafe` binding redirect, without which every
   Govee call times out with a bogus GUID error.
 
-[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/FlashGalatine/claude-govee-lights/compare/v0.1.1...v0.2.0

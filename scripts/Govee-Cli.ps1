@@ -358,7 +358,12 @@ switch ($Command.ToLowerInvariant()) {
         }
         $cfgPath = Join-Path $env:LOCALAPPDATA 'ClaudeGovee\config.json'
         Set-ConfigGuid $cfgPath $value
-        Write-Output "Saved API GUID to $cfgPath."
+        # Keep a seed beside it. If config.json's GUID is later overwritten with a bad one
+        # (it happened on 2026-09-21), the daemon falls back to this file instead of failing
+        # silently. Same folder, same user: it exposes nothing config.json does not.
+        $seedPath = Join-Path (Split-Path $cfgPath -Parent) 'Govee-API-GUID.txt'
+        [System.IO.File]::WriteAllText($seedPath, $value)
+        Write-Output "Saved API GUID to $cfgPath (and $seedPath, its fallback)."
         if ($noRestart) { break }
 
         $h = Restart-Daemon
@@ -418,7 +423,13 @@ switch ($Command.ToLowerInvariant()) {
 
         $h = Call '/health'
         Write-Output ("  Daemon responding        : {0}" -f [bool]$h)
-        if ($h) { Write-Output ("  Govee connection         : {0}" -f $h.goveeState) }
+        if ($h) {
+            Write-Output ("  Govee connection         : {0}" -f $h.goveeState)
+            if ($h.usingFallbackGuid) {
+                Write-Output "  API GUID                 : config.json's is WRONG - running on a fallback (seed or known-guids.txt)."
+                Write-Output "     ^ fix it permanently: '/govee guid <value>' with the GUID from Govee Desktop > Settings > API."
+            }
+        }
 
         $cfgPath = Join-Path $env:LOCALAPPDATA 'ClaudeGovee\config.json'
         Write-Output ("  Config                   : {0}" -f $cfgPath)

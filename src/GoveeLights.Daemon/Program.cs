@@ -53,8 +53,17 @@ namespace GoveeLights
             if (args.Any(a => string.Equals(a, "--dump-emits", StringComparison.OrdinalIgnoreCase)))
                 return EmitDump.Run(args);
 
+            // Headless self-heal gate check (Test-Repo.ps1). Same contract: no side effects.
+            if (args.Any(a => string.Equals(a, "--dump-guid-gate", StringComparison.OrdinalIgnoreCase)))
+                return GoveeClient.DumpGuidGate(args);
+
             var console = args.Any(a => a == "--console");
             if (console) { AllocConsole(); Log.AlsoConsole = true; }
+
+            // Test-only: run against a scratch config dir. See DaemonConfig.DirOverride.
+            for (int i = 0; i < args.Length - 1; i++)
+                if (string.Equals(args[i], "--config-dir", StringComparison.OrdinalIgnoreCase))
+                    DaemonConfig.DirOverride = args[i + 1];
 
             var dir = DaemonConfig.DefaultDir;
             Directory.CreateDirectory(dir);
@@ -78,9 +87,21 @@ namespace GoveeLights
 
             if (string.IsNullOrWhiteSpace(_cfg.ApiGuid))
             {
-                Log.Fatal("no_guid", "config.json has no apiGuid; copy it from Govee Desktop Settings > API");
-                if (console) { Console.WriteLine("No apiGuid in " + configPath); Console.ReadKey(); }
-                return 2;
+                // A config that exists but lost its GUID (an edit gone wrong, a bad refresh)
+                // can still start if a Govee-API-GUID.txt seed is around - the same file the
+                // self-heal falls back to. Only refuse when there is genuinely nothing.
+                var seed = FindSeedGuid();
+                if (!string.IsNullOrWhiteSpace(seed))
+                {
+                    _cfg.ApiGuid = seed;
+                    Log.Warn("guid_seeded", "config.json had no apiGuid; using the Govee-API-GUID.txt seed");
+                }
+                else
+                {
+                    Log.Fatal("no_guid", "config.json has no apiGuid; run '/govee guid <value>' with the GUID from Govee Desktop Settings > API");
+                    if (console) { Console.WriteLine("No apiGuid in " + configPath + " and no Govee-API-GUID.txt seed found."); Console.ReadKey(); }
+                    return 2;
+                }
             }
 
             Log.Info("starting", "daemon boot", new Dictionary<string, object>
@@ -95,7 +116,11 @@ namespace GoveeLights
                 Ttl = TimeSpan.FromMinutes(Math.Max(1, _cfg.SessionTtlMinutes))
             };
             _mapper = new HookMapper(_sessions, _cfg.ToolClassMap);
-            _govee = new GoveeClient(_cfg.GoveeDllPath, _cfg.ApiGuid);
+            // Pass lookups, not captured values, so a seed added after boot - or a GUID the
+            // history learned - is still found if the GUID in use is later rejected.
+            _govee = new GoveeClient(_cfg.GoveeDllPath, _cfg.ApiGuid,
+                () => FindSeedGuids().Concat(ReadKnownGuids(false)), RecordKnownGuid,
+                () => Cfg().ApiGuid);
             _renderer = new Renderer(_govee, _sessions, Cfg, _styles);
 
             // A roster reloaded later (retry after a cold-start race, or /refresh) is
@@ -252,6 +277,7 @@ namespace GoveeLights
                 { "pid", System.Diagnostics.Process.GetCurrentProcess().Id },
                 { "uptimeSec", Math.Round((DateTime.UtcNow - _startedAt).TotalSeconds, 1) },
                 { "goveeState", _govee.Connected ? "ready" : "offline" },
+                { "usingFallbackGuid", _govee.UsingFallbackGuid },
                 { "state", _renderer.Current.ToString() },
                 { "sessions", _sessions.Count }
             }));
@@ -270,7 +296,9 @@ namespace GoveeLights
                 { "govee", new Dictionary<string, object>
                     {
                         { "connected", _govee.Connected },
-                        { "lastError", _govee.LastError }
+                        { "lastError", _govee.LastError },
+                        { "usingFallbackGuid", _govee.UsingFallbackGuid },
+                        { "initFailures", _govee.InitFailures }
                     } },
                 { "render", _renderer.Status() },
                 { "sessions", _sessions.Snapshot() }
@@ -391,21 +419,96 @@ namespace GoveeLights
         static DaemonConfig BuildDefaultConfig()
         {
             var cfg = new DaemonConfig { States = Palette.Defaults() };
+            cfg.ApiGuid = FindSeedGuid() ?? "";
+            return cfg;
+        }
 
-            // Seed the GUID from the repo file if it is sitting next to the exe tree, so a
-            // first run works without hand-editing config.json.
+        /// <summary>The first Govee-API-GUID.txt seed, or null. Used where one GUID is
+        /// needed: a fresh default config and the empty-GUID rescue at startup.</summary>
+        static string FindSeedGuid() => FindSeedGuids().FirstOrDefault();
+
+        /// <summary>Every Govee-API-GUID.txt seed, nearest first: beside config.json (the
+        /// stable, user-writable spot a reinstall leaves alone, and what /govee guid
+        /// writes), then each one walking up from the exe (where the repo or installed
+        /// plugin keeps it). All of them, not just the first: the nearest is often the same
+        /// GUID that was just rejected, and a farther one may be the one that works. The
+        /// files hold a credential and are gitignored.</summary>
+        static List<string> FindSeedGuids()
+        {
+            var found = new List<string>();
+            Action<string> take = f =>
+            {
+                try
+                {
+                    if (!File.Exists(f)) return;
+                    var g = File.ReadAllText(f).Trim();
+                    if (g.Length > 0 && !found.Any(x => GoveeClient.GuidEquals(x, g))) found.Add(g);
+                }
+                catch { }
+            };
+            take(Path.Combine(DaemonConfig.DefaultDir, "Govee-API-GUID.txt"));
             try
             {
                 var here = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 for (var d = new DirectoryInfo(here); d != null; d = d.Parent)
-                {
-                    var f = Path.Combine(d.FullName, "Govee-API-GUID.txt");
-                    if (File.Exists(f)) { cfg.ApiGuid = File.ReadAllText(f).Trim(); break; }
-                }
+                    take(Path.Combine(d.FullName, "Govee-API-GUID.txt"));
             }
             catch { }
+            return found;
+        }
 
-            return cfg;
+        // ---- known-good GUID history ----------------------------------------------
+        // Every GUID Govee Desktop has accepted on this machine, newest first. A seed holds
+        // one value, and /govee guid overwrites it - so if Desktop shows a different GUID
+        // for a while and the user follows it, the seed loses the old one. The history keeps
+        // both, so a GUID that flips away and back heals in either direction. It never holds
+        // a GUID Desktop refused: entries are added only on a successful InitConnect.
+
+        const int KnownGuidsMax = 5;
+        static string KnownGuidsPath => Path.Combine(DaemonConfig.DefaultDir, "known-guids.txt");
+
+        /// <summary>The history, newest first. Falls back to the .tmp when the main file is
+        /// missing: a File.Replace that fails partway (an antivirus scanner holding the .tmp)
+        /// can delete the original and leave the data only there. With <paramref name="strict"/>
+        /// a read error throws instead of reading as empty - the writer uses that, so a
+        /// history it could not read is never overwritten with one entry.</summary>
+        static List<string> ReadKnownGuids(bool strict)
+        {
+            try
+            {
+                var tmp = KnownGuidsPath + ".tmp";
+                var path = File.Exists(KnownGuidsPath) ? KnownGuidsPath : File.Exists(tmp) ? tmp : null;
+                if (path == null) return new List<string>();
+                Guid ignored;
+                return File.ReadAllLines(path)
+                    .Select(l => l.Trim())
+                    .Where(l => Guid.TryParse(l, out ignored))
+                    .Take(KnownGuidsMax)
+                    .ToList();
+            }
+            catch
+            {
+                if (strict) throw;
+                return new List<string>();
+            }
+        }
+
+        /// <summary>Move <paramref name="guid"/> to the front of the history. Runs on the
+        /// Govee worker thread after a successful connect; GoveeClient logs anything this
+        /// throws. Written to a temp file and moved into place, so a crash mid-write cannot
+        /// truncate the history.</summary>
+        static void RecordKnownGuid(string guid)
+        {
+            var list = ReadKnownGuids(true);
+            if (list.Count > 0 && GoveeClient.GuidEquals(list[0], guid)) return;
+            list.RemoveAll(x => GoveeClient.GuidEquals(x, guid));
+            list.Insert(0, guid.Trim());
+            if (list.Count > KnownGuidsMax) list.RemoveRange(KnownGuidsMax, list.Count - KnownGuidsMax);
+
+            var tmp = KnownGuidsPath + ".tmp";
+            File.WriteAllLines(tmp, list);
+            if (File.Exists(KnownGuidsPath)) File.Replace(tmp, KnownGuidsPath, null);
+            else File.Move(tmp, KnownGuidsPath);
         }
 
         static string Str(IDictionary<string, object> d, string key)

@@ -221,15 +221,37 @@ makes the plugin installable without a UAC prompt or a scheduled task.
 | Symptom | Cause |
 |---|---|
 | `100` in ~30 ms | Pipe write denied — Govee Desktop is running elevated |
-| `1001` in ~6 s | Request sent, no usable reply — bad GUID, or API switch off |
+| `1001` in ~15–30 ms | **GUID rejected.** A real round trip came back: Desktop evaluated the GUID and refused it. The GUID in the config is wrong. |
+| `1001` in ~6 s | No usable reply — the missing bindingRedirect above. The GUID was never evaluated. |
 | `0` immediately | Working |
+
+The fast `1001` row was measured on 2026-10-05: 5,037 consecutive rejections of a stale
+GUID logged at 15–32 ms each, with the redirect in place. The daemon's self-heal keys
+off exactly this split: it only tries other GUIDs (the `Govee-API-GUID.txt` seeds and
+`known-guids.txt`, the GUIDs Desktop accepted before) on a `1001` under 3 s, because no
+GUID can fix the ~6 s case. Whether Settings ▸ API being *off* produces
+the fast or the slow `1001` has not been measured.
 
 ## Environment facts
 
 - `\\.\pipe\GoveeDesktopPipe` is openable for **read/write** by a non-elevated same-user
   process **only when Govee Desktop is itself non-elevated** (see above).
 - The API GUID is **not persisted anywhere on disk** — not in `%LOCALAPPDATA%\GoveeDesktop`,
-  not in the registry. It can only be read from Settings ▸ API in the UI.
+  not in the registry. It can only be read from Settings ▸ API in the UI. Inside Govee
+  Desktop it is the static `GlobalParameters.ThirdConnectGuid`
+  (`Govee.Infrastructure.Shared.dll`); the only Govee-side files that could hold it are
+  the AES-encrypted `[sectionfirst]` blobs in `config\device_config.ini`. How it is
+  generated cannot be read statically: Govee's assemblies are obfuscated (method bodies
+  decompile to `throw new Exception("Runtime exception")`; the real IL is decrypted at
+  run time). Names survive, which is how the property was found.
+- **The GUID is mostly stable, but not provably constant.** It belongs to Govee Desktop,
+  not to any device, so power-cycling lights cannot change it. One machine showed the
+  same GUID on 2026-08-08 and 2026-10-05, yet its config was "refreshed" to a different
+  GUID on 2026-09-21 — during a stretch of LAN errors in Govee's own log — and that value
+  was rejected after a reboot and Desktop restart on 2026-09-25. The most likely reading is
+  that Desktop briefly issued a different GUID and then went back; the mechanism is
+  unknown (see obfuscation above). Practical rule: when `1001` appears, compare
+  `config.json` against Settings ▸ API rather than assuming either side is right.
 - Govee Desktop itself is self-contained .NET 6 — a different runtime from the .NET Framework
   shim it ships.
 - Windows PowerShell 5.1 runs on .NET Framework 4.x and can host `GoveeAPI.dll` directly with

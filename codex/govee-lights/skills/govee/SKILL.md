@@ -36,6 +36,10 @@ user's requested change; explain these broader effects when relevant.
 
 Both Claude Code and Codex share port 17321 and
 `%LOCALAPPDATA%\ClaudeGovee\config.json`. Existing GUIDs and themes work in both.
+Version 0.5.0 of the shared daemon recovers a rejected GUID from the seed files or
+`known-guids.txt`; `doctor` reports when a fallback is in use. The `guid` command
+also updates the seed beside the config. After updating the plugin, check `status`
+and run `restart` once if the shared daemon still reports an older version.
 If the daemon is stopped, run `<plugin-root>/scripts/Ensure-Daemon.ps1` when starting
 it is needed for the request. A missing executable requires rebuilding the Codex
 package from the source repository with `scripts/Build-CodexPlugin.ps1`.

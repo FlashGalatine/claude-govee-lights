@@ -17,7 +17,15 @@ If the output says the daemon is not running, offer to start it with
 
 If the output says there is no API GUID (from `doctor`, or a daemon that exits with
 `no_guid`), tell the user to copy it from Govee Desktop ▸ Settings ▸ API and run
-`/govee guid <value>` — that writes it to config.json and starts the daemon.
+`/govee guid <value>`. That writes it to config.json and to the Govee-API-GUID.txt seed
+beside it, then starts the daemon.
+
+If `doctor` says config.json's GUID is WRONG and the daemon is running on a fallback, or
+`status` shows `govee : OFFLINE - API GUID rejected.`, the GUID in config.json no longer
+matches Govee Desktop. Do not tell the user their lights caused it: the GUID belongs to
+Govee Desktop. Ask them for the current value from Settings ▸ API and run
+`/govee guid <value>`. (The daemon has already tried its seeds and its recent history of
+accepted GUIDs, known-guids.txt; reaching OFFLINE means none of those works now.)
 
 If `doctor` reports that the pipe is not writable, the cause is almost always that
 Govee Desktop is running as administrator — tell the user to restart it normally.
