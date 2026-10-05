@@ -1281,12 +1281,20 @@ try {
     if ($r.Out -match [regex]::Escape($guidCfg)) { Ok 'guid reports the file it wrote' }
     else { No 'guid reports the file it wrote' $r.Out }
 
+    # The seed beside config.json is what the daemon's self-heal falls back to when the
+    # configured GUID is rejected - so the verb must keep it in step with config.json.
+    $guidSeed = Join-Path $guidScratch 'ClaudeGovee\Govee-API-GUID.txt'
+    if ((Test-Path $guidSeed) -and ([System.IO.File]::ReadAllText($guidSeed) -eq $value)) { Ok 'guid also writes the Govee-API-GUID.txt seed beside config.json' }
+    else { No 'guid also writes the Govee-API-GUID.txt seed beside config.json' "exists=$(Test-Path $guidSeed)" }
+
     # A second write must replace, not append or double up.
     $value2 = 'ffffffff-1111-4222-8333-444444444444'
     $r = Invoke-CliScratch @('guid', $value2, '--no-restart')
     $after = [System.IO.File]::ReadAllText($guidCfg)
     if ($after -eq $original.Replace('"ApiGuid": ""', '"ApiGuid": "' + $value2 + '"')) { Ok 'guid overwrites a GUID that is already set' }
     else { No 'guid overwrites a GUID that is already set' $after }
+    if ([System.IO.File]::ReadAllText($guidSeed) -eq $value2) { Ok 'guid replaces the seed along with config.json' }
+    else { No 'guid replaces the seed along with config.json' ([System.IO.File]::ReadAllText($guidSeed)) }
 
     # No config at all - the daemon has never run. The daemon fills every missing key
     # from its own defaults (JavaScriptSerializer keeps property initialisers), so a
@@ -1317,11 +1325,78 @@ try {
     Remove-Item $guidScratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# ------------------------------------------------------- guid self-heal gate
+# The daemon tries other known GUIDs only after a FAST 1001 - a real refusal. The ~6s
+# 1001 is the missing bindingRedirect: the GUID was never evaluated, and swapping GUIDs
+# there would bury the real fault. Scripts/Test-GuidSelfHeal.ps1 proves the whole flow on
+# real hardware; this pins the decision logic with none, through --dump-guid-gate.
+Section 'GUID self-heal gate'
+function Invoke-Gate([string] $GateArgs) {
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList ('--dump-guid-gate ' + $GateArgs) `
+            -NoNewWindow -PassThru -RedirectStandardOutput $tmp
+        # A headless dump returns in well under a second. Anything still running is a real
+        # daemon - never let it live on.
+        if (-not $p.WaitForExit(10000)) { try { $p.Kill() } catch { } }
+        $out = @{}
+        foreach ($l in Get-Content $tmp) { $k, $v = $l -split ',', 2; $out[$k] = $v }
+        return $out
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+# Ask the binary, without running it, whether it knows --dump-guid-gate: C# string
+# literals are stored as UTF-16 in the assembly. An exe built before this mode ignores
+# the flag and starts as a REAL daemon - on the live config, binding the live port and
+# driving the lights - so a stale dist\daemon must never be launched here.
+function Test-ExeHasLiteral([string] $Path, [string] $Literal) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $hex = [System.BitConverter]::ToString($bytes)
+    $needle = [System.BitConverter]::ToString([System.Text.Encoding]::Unicode.GetBytes($Literal))
+    return $hex.Contains($needle)
+}
+if (-not $exe) {
+    Write-Host '  SKIP  no build output found (run scripts\Build.ps1)' -ForegroundColor DarkGray
+} elseif (-not (Test-ExeHasLiteral $exe '--dump-guid-gate')) {
+    No 'build output knows --dump-guid-gate' "$exe predates it - rebuild, then re-run (not launched: it would start as a real daemon)"
+} else {
+    $gateCases = @(
+        @{ A = '--code 1001 --ms 16';   K = 'rejection'; W = 'True';  N = 'a fast 1001 counts as a GUID rejection' },
+        @{ A = '--code 1001 --ms 6000'; K = 'rejection'; W = 'False'; N = 'a ~6 s 1001 (missing bindingRedirect) never triggers a GUID swap' },
+        @{ A = '--code 100 --ms 29';    K = 'rejection'; W = 'False'; N = 'an elevated-Desktop 100 is not a GUID rejection' },
+        @{ A = '--active aaaa --configured AAAA --others bbbb'; K = 'candidates'; W = 'bbbb';      N = 'a differing seed is tried; config matches case-insensitively' },
+        @{ A = '--active aaaa --configured aaaa --others aaaa'; K = 'candidates'; W = '';          N = 'a seed equal to the GUID in use is not retried' },
+        @{ A = '--active aaaa --configured aaaa';               K = 'candidates'; W = '';          N = 'with no seed or history there is nothing to fall back to' },
+        @{ A = '--active bbbb --configured aaaa --others bbbb'; K = 'candidates'; W = 'aaaa';      N = 'on a fallback, config.json''s GUID is retried (the swap is not sticky)' },
+        @{ A = '--active cccc --configured aaaa --others bbbb'; K = 'candidates'; W = 'aaaa;bbbb'; N = 'config.json''s GUID is tried before seeds and history' },
+        # The 2026-09-21 shape: /govee guid wrote the same GUID to config and seed, Desktop
+        # then went back to the old one. Only the history still holds it.
+        @{ A = '--active bbbb --configured bbbb --others bbbb;aaaa'; K = 'candidates'; W = 'aaaa'; N = 'history rescues a flip-back when config and seed hold the same rejected GUID' },
+        @{ A = '--active aaaa --configured aaaa --others bbbb;BBBB;cccc'; K = 'candidates'; W = 'bbbb;cccc'; N = 'seed and history duplicates collapse, order kept' },
+        @{ A = '--code 1001 --ms 16';   K = 'hint'; W = 'Fix: ''/govee guid <value>'' with the GUID from Govee Desktop > Settings > API.'; N = 'a fast 1001 names the GUID fix' },
+        @{ A = '--code 1001 --ms 6000'; K = 'hint'; W = 'Fix: the GUID is probably fine - GoveeLightsDaemon.exe.config (the bindingRedirect) must sit beside the exe; see docs/API-NOTES.md.'; N = 'a ~6 s 1001 names the bindingRedirect, not the GUID' },
+        @{ A = '--code 100 --ms 29';    K = 'hint'; W = 'Fix: Govee Desktop is running as administrator - restart it normally.'; N = 'a fast 100 names the elevated-Desktop fix' },
+        @{ A = '--code 100 --ms 5000';  K = 'hint'; W = 'Govee Desktop may still be starting; the daemon keeps retrying on its own.'; N = 'a slow 100 (cold start) does not blame elevation' }
+    )
+    foreach ($c in $gateCases) {
+        $r = Invoke-Gate $c.A
+        if ($r[$c.K] -eq $c.W) { Ok $c.N } else { No $c.N "got '$($r[$c.K])', want '$($c.W)'" }
+    }
+}
+
 # --------------------------------------------------------------- housekeeping
 Section 'Housekeeping'
 $gitignore = Get-Content (Join-Path $root '.gitignore') -Raw -ErrorAction SilentlyContinue
 if ($gitignore -match 'Govee-API-GUID\.txt') { Ok '.gitignore excludes the API GUID' }
 else { No '.gitignore excludes the API GUID' 'The GUID is a credential.' }
+
+# .gitignore stops an accidental add, not a forced one. A tracked seed would leak the
+# credential AND quietly break CI's fail-fast check: the daemon starts from any
+# Govee-API-GUID.txt it finds walking up from the exe, so the "no GUID -> exit 2" step
+# would hang instead. Assert the invariant that step relies on.
+$trackedSeeds = @(& git -C $root ls-files 2>$null | Where-Object { $_ -match '(^|/)Govee-API-GUID\.txt$|(^|/)known-guids\.txt$' })
+if ($LASTEXITCODE -ne 0) { Write-Host '  SKIP  not a git checkout - cannot check for a tracked GUID file' -ForegroundColor DarkGray }
+elseif ($trackedSeeds.Count -eq 0) { Ok 'no API GUID file is tracked by git' }
+else { No 'no API GUID file is tracked by git' ($trackedSeeds -join ', ') }
 
 if (Test-Path (Join-Path $root 'LICENSE')) { Ok 'LICENSE present' } else { No 'LICENSE present' }
 if (Test-Path (Join-Path $root 'docs/API-NOTES.md')) { Ok 'docs/API-NOTES.md present' } else { No 'docs/API-NOTES.md present' }

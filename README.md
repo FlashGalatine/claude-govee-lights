@@ -75,9 +75,13 @@ Once it is installed, `/govee guid <value>` does step 2 from inside Claude Code,
 `/govee doctor` tells you when the GUID is the thing missing.
 
 Config lives at `%LOCALAPPDATA%\ClaudeGovee\config.json` and is written with defaults on
-first run. `/govee guid` writes the GUID into it (a `Govee-API-GUID.txt` in the repo
-root is also picked up on first run, which is handy when developing). It hot-reloads on
-save.
+first run. `/govee guid` writes the GUID into it, and also into a `Govee-API-GUID.txt`
+seed beside it. The daemon also keeps `known-guids.txt` there: the last few GUIDs Govee
+Desktop accepted. If Desktop ever rejects the GUID in `config.json`, the daemon tries the
+seed and then that history, connects with whichever is accepted, says so loudly in its
+log, and `/govee doctor` reports that `config.json`'s GUID is wrong. So a GUID that
+changes and later changes back heals on its own. (A `Govee-API-GUID.txt` in the repo root
+is also picked up, which is handy when developing.) It hot-reloads on save.
 
 ## Commands
 
@@ -234,6 +238,14 @@ Run `/govee doctor` first. The two failure modes worth knowing:
 fine. This is a missing `System.Runtime.CompilerServices.Unsafe` binding redirect —
 `GoveeLightsDaemon.exe.config` must be next to the exe. `Build.ps1` fails loudly if it
 is missing. Details in [docs/API-NOTES.md](docs/API-NOTES.md).
+
+**Lights stopped; the log shows `govee_init_failed` with code `1001` in ~20 ms.** Govee
+Desktop answered and rejected the GUID: the one in `config.json` no longer matches
+Settings ▸ API. Power-cycling your lights cannot cause this — the GUID belongs to Govee
+Desktop — but the config can be overwritten, and Desktop has been seen to show a different
+GUID for a while. Run `/govee guid <value>` with what Settings ▸ API shows now. If Desktop
+went back to a GUID it accepted before, the daemon has already fallen back to it and
+`/govee doctor` says so. A `1001` after ~6 s is a different problem: see the next entry.
 
 **Fast failure (~30 ms), pipe not writable.** Govee Desktop is running as administrator.
 Restart it normally. Govee's own documentation tells you to run it elevated; doing so

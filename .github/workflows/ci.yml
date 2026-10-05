@@ -68,9 +68,11 @@ jobs:
           # crash - which exercises assembly loading, App.config binding, JSON and
           # logging in one go.
           #
-          # Seed a config with no GUID so the outcome is deterministic. Relying on the
-          # GUID file simply being absent would silently change behaviour the day
-          # someone commits one.
+          # Seed a config with no GUID. That alone is not enough: the daemon starts from
+          # a Govee-API-GUID.txt seed when it finds one (beside the config, or walking up
+          # from the exe), so exit 2 also needs no seed on the runner. The runner's
+          # %LOCALAPPDATA% is clean, and Test-Repo.ps1 (run above) fails the build if a
+          # seed is ever tracked by git - so the outcome stays deterministic.
           $dir = Join-Path $env:LOCALAPPDATA 'ClaudeGovee'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           '{"Enabled":true,"ApiGuid":"","Port":17321}' | Set-Content (Join-Path $dir 'config.json') -Encoding UTF8

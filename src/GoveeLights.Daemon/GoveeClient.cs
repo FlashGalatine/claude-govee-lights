@@ -56,7 +56,22 @@ namespace GoveeLights
     public sealed class GoveeClient : IGoveeTransport, IDisposable
     {
         readonly string _dllPath;
-        readonly string _guid;
+        readonly string _startupGuid;    // what config.json said at startup
+        // config.json's GUID as of now. config.json hot-reloads, and a hand-edited GUID is
+        // the obvious fix to try, so the self-heal and the fallback flag must follow it
+        // rather than the startup value.
+        readonly Func<string> _configuredGuid;
+        volatile string _guid;           // the GUID in use: the last one that worked
+        // Supplies the other GUIDs worth trying when the one in use is rejected: the
+        // Govee-API-GUID.txt seeds, then the history of GUIDs Govee Desktop has accepted
+        // before. Read lazily, only after a rejection. See the self-heal in ConnectIfNeeded
+        // and docs/API-NOTES.md "a missing bindingRedirect looks like a bad GUID" - that
+        // case must NOT trigger a swap, which is why it is gated on a fast rejection.
+        readonly Func<IEnumerable<string>> _fallbackGuids;
+        // Told each GUID Govee Desktop accepts, so the history above can grow. This is what
+        // lets a GUID that flips and flips back heal in both directions.
+        readonly Action<string> _onAccepted;
+        string _lastRecorded;
         readonly BlockingCollection<Action> _queue = new BlockingCollection<Action>(new ConcurrentQueue<Action>(), 512);
         readonly Thread _worker;
         readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
@@ -69,6 +84,27 @@ namespace GoveeLights
         volatile bool _disposed;
         DateTime _nextRetry = DateTime.MinValue;
         int _retryStep;
+
+        // Self-heal + log-throttle state. Written only on the worker thread; the two
+        // volatile fields are also read by HTTP threads for /health and /status.
+        volatile bool _usingFallback;     // the GUID in use is not config.json's
+        volatile int _initFailStreak;     // consecutive InitConnect failures
+        GoveeCode _lastLoggedFailCode = GoveeCode.Success;
+        DateTime _lastFailLogUtc = DateTime.MinValue;
+        // How often to re-log an unchanged, still-failing InitConnect. The old code logged
+        // every retry (~once a minute), which buried the one line that mattered under
+        // hundreds a day - a real incident ran ~2 weeks unnoticed this way.
+        static readonly TimeSpan FailLogInterval = TimeSpan.FromMinutes(15);
+
+        /// <summary>True while the GUID in use is not config.json's current one - the
+        /// configured GUID was rejected and a seed or remembered GUID took over. Computed
+        /// live, so fixing config.json clears it at once. Surfaced in /health and /status
+        /// so the drift is visible instead of silently papered over.</summary>
+        public bool UsingFallbackGuid => !GuidEquals(_guid, ConfiguredGuid());
+
+        /// <summary>Consecutive InitConnect failures since the last success. Only the first
+        /// of a streak is logged loudly, so this is where the rest are still counted.</summary>
+        public int InitFailures => _initFailStreak;
 
         // Roster retry. Govee Desktop answers the pipe before it has finished discovering
         // devices on the LAN, so the first roster after a cold start can come back with
@@ -87,10 +123,16 @@ namespace GoveeLights
         /// without it, a retry would update Devices and change nothing observable.</summary>
         public Action DevicesLoaded;
 
-        public GoveeClient(string dllPath, string guid)
+        public GoveeClient(string dllPath, string guid,
+                           Func<IEnumerable<string>> fallbackGuids = null, Action<string> onAccepted = null,
+                           Func<string> configuredGuid = null)
         {
             _dllPath = dllPath;
-            _guid = guid ?? "";
+            _startupGuid = (guid ?? "").Trim();
+            _guid = _startupGuid;
+            _fallbackGuids = fallbackGuids;
+            _onAccepted = onAccepted;
+            _configuredGuid = configuredGuid;
             _worker = new Thread(WorkerLoop)
             {
                 Name = "govee-worker",
@@ -196,38 +238,211 @@ namespace GoveeLights
             if (_connected || _api == null) return;
             if (DateTime.UtcNow < _nextRetry) return;
 
-            var sw = Stopwatch.StartNew();
-            object raw;
-            try { raw = _mInit.Invoke(_api, new object[] { _guid }); }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                Log.Exception("govee_init_threw", ex);
-                LastError = ex.Message;
-                Backoff();
-                return;
-            }
-            sw.Stop();
+            long ms;
+            string initError;
+            var configured = ConfiguredGuid();
+            var code = TryInit(_guid, out ms, out initError);
 
-            var code = ParseCode(raw);
+            // The GUID in use was rejected outright (not the ~6s bindingRedirect timeout,
+            // which no GUID can fix). Try every other GUID we know - config.json's, if we
+            // had moved off it, then the seeds, then ones Desktop accepted before - before
+            // giving up. Every retry re-runs this, so nothing is sticky: if Desktop goes
+            // back to an earlier GUID, the next retry finds it. Each refusal costs ~20 ms,
+            // so the whole walk is far cheaper than one backoff interval.
+            if (IsRejection(code, ms))
+            {
+                foreach (var candidate in FallbackCandidates(_guid, configured, OtherGuids()))
+                {
+                    long cms;
+                    string cerr;
+                    var c = TryInit(candidate, out cms, out cerr);
+                    Log.Debug("govee_guid_candidate", "tried another known GUID",
+                        new Dictionary<string, object> { { "tail", Tail(candidate) }, { "code", (int)c }, { "ms", cms } });
+                    if (c == GoveeCode.Success) { _guid = candidate; code = c; ms = cms; initError = null; break; }
+                    // Anything but another fast refusal means the GUID is not what is
+                    // failing - report that instead of the first GUID's 1001.
+                    if (!IsRejection(c, cms)) { code = c; ms = cms; initError = cerr; break; }
+                }
+            }
+
             if (code == GoveeCode.Success)
             {
+                var fallback = !GuidEquals(_guid, configured);
+                if (fallback && !_usingFallback)
+                    Log.Error("govee_guid_selfhealed",
+                        "config.json's GUID was rejected; connected using another GUID Govee Desktop accepts " +
+                        "(a Govee-API-GUID.txt seed or one it accepted before). " +
+                        "Fix it permanently with '/govee guid <value>' using Govee Desktop > Settings > API",
+                        new Dictionary<string, object> { { "configTail", Tail(configured) }, { "usingTail", Tail(_guid) } });
+                else if (!fallback && _usingFallback)
+                    Log.Info("govee_guid_config_restored", "config.json's GUID is accepted again; no longer using a fallback");
+                _usingFallback = fallback;
+
+                // Remember it, so a GUID that flips away and back can heal later.
+                if (_onAccepted != null && !GuidEquals(_guid, _lastRecorded))
+                {
+                    try { _onAccepted(_guid); _lastRecorded = _guid; }
+                    catch (Exception ex) { Log.Exception("guid_record_failed", ex); }
+                }
+
                 _connected = true;
                 _retryStep = 0;
                 _devRetryStep = 0;   // a fresh connection gets a fresh roster budget
+                _initFailStreak = 0;
+                _lastLoggedFailCode = GoveeCode.Success;
                 LastError = null;
-                Log.Info("govee_connected", "InitConnect succeeded", new Dictionary<string, object> { { "ms", sw.ElapsedMilliseconds } });
+                Log.Info("govee_connected", "InitConnect succeeded",
+                    new Dictionary<string, object> { { "ms", ms }, { "fallback", fallback } });
                 LoadDevices();
             }
             else
             {
                 _connected = false;
-                LastError = Explain(code, sw.ElapsedMilliseconds);
-                Log.Warn("govee_init_failed", LastError, new Dictionary<string, object>
-                {
-                    { "code", (int)code }, { "ms", sw.ElapsedMilliseconds }
-                });
+                // An exception's own message beats the generic text for its code.
+                LastError = initError ?? Explain(code, ms);
+                LogInitFailure(code, ms);
                 Backoff();
+            }
+        }
+
+        /// <summary>One InitConnect attempt. Returns the parsed code and sets <paramref name="ms"/>
+        /// to the round-trip time - the two init failure modes are indistinguishable without it.
+        /// <paramref name="error"/> carries the exception message if the call threw, else null.</summary>
+        GoveeCode TryInit(string guid, out long ms, out string error)
+        {
+            error = null;
+            var sw = Stopwatch.StartNew();
+            object raw;
+            try { raw = _mInit.Invoke(_api, new object[] { guid ?? "" }); }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                ms = sw.ElapsedMilliseconds;
+                // Same streak rule as LogInitFailure: the stack trace once, not every retry.
+                if (_initFailStreak == 0) Log.Exception("govee_init_threw", ex);
+                else Log.Debug("govee_init_threw", ex.Message);
+                error = ex.Message;
+                return GoveeCode.Unparsable;
+            }
+            sw.Stop();
+            ms = sw.ElapsedMilliseconds;
+            return ParseCode(raw);
+        }
+
+        /// <summary>config.json's GUID now: the live value if a lookup was supplied, else the
+        /// one the client was built with. Called from the worker and from HTTP threads.</summary>
+        string ConfiguredGuid()
+        {
+            if (_configuredGuid == null) return _startupGuid;
+            try { return (_configuredGuid() ?? "").Trim(); } catch { return _startupGuid; }
+        }
+
+        IEnumerable<string> OtherGuids()
+        {
+            if (_fallbackGuids == null) return Enumerable.Empty<string>();
+            try { return (_fallbackGuids() ?? Enumerable.Empty<string>()).ToList(); }
+            catch (Exception ex) { Log.Exception("guid_fallbacks_failed", ex); return Enumerable.Empty<string>(); }
+        }
+
+        /// <summary>A real refusal of the GUID: 1001 from a completed round trip. The ~6s 1001
+        /// is the missing bindingRedirect (docs/API-NOTES.md) - the GUID was never evaluated,
+        /// so trying other GUIDs there would only hide the real fault.</summary>
+        internal static bool IsRejection(GoveeCode code, long ms) =>
+            code == GoveeCode.ApiGuidError && ms <= 3000;
+
+        /// <summary>The other GUIDs worth trying after <paramref name="active"/> is refused:
+        /// config.json's first (the user's stated intent), then <paramref name="others"/> in
+        /// order (seeds, then GUIDs accepted before). Blank values, the active GUID and
+        /// duplicates are dropped, compared case- and space-insensitively. Pure, so
+        /// --dump-guid-gate can check it in CI without the DLL.</summary>
+        internal static List<string> FallbackCandidates(string active, string configured, IEnumerable<string> others)
+        {
+            var list = new List<string>();
+            foreach (var g in new[] { configured }.Concat(others ?? Enumerable.Empty<string>()))
+            {
+                if (string.IsNullOrWhiteSpace(g) || GuidEquals(g, active)) continue;
+                if (list.Any(x => GuidEquals(x, g))) continue;
+                list.Add(g.Trim());
+            }
+            return list;
+        }
+
+        internal static bool GuidEquals(string a, string b) =>
+            string.Equals((a ?? "").Trim(), (b ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Headless check of the self-heal gate for Test-Repo.ps1: no DLL, no
+        /// config, no port. Prints "rejection,True|False" for --code/--ms and
+        /// "candidates,a;b" for --active/--configured/--others "x;y" (an omitted flag is
+        /// null), plus "hint,..." - the fix the first-failure log line would name.</summary>
+        internal static int DumpGuidGate(string[] args)
+        {
+            Func<string, string> arg = name =>
+            {
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+                return null;
+            };
+            int code;
+            long ms;
+            int.TryParse(arg("--code") ?? "0", out code);
+            long.TryParse(arg("--ms") ?? "0", out ms);
+            var others = (arg("--others") ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+            Console.WriteLine("rejection," + IsRejection((GoveeCode)code, ms));
+            Console.WriteLine("candidates," + string.Join(";", FallbackCandidates(arg("--active"), arg("--configured"), others)));
+            Console.WriteLine("hint," + FixHint((GoveeCode)code, ms).Trim());
+            return 0;
+        }
+
+        /// <summary>Last 4 characters of a GUID - enough to tell two apart in a log without
+        /// writing the credential itself to disk.</summary>
+        static string Tail(string guid) =>
+            string.IsNullOrEmpty(guid) ? "(none)" : "…" + guid.Substring(Math.Max(0, guid.Length - 4));
+
+        /// <summary>Loud once, then quiet. The first failure of a streak - and any change of
+        /// code - is an ERROR carrying the fix; after that an unchanged failure is re-logged
+        /// at WARN only every FailLogInterval, with the streak count. This is the fix for the
+        /// flood that buried a two-week outage.</summary>
+        void LogInitFailure(GoveeCode code, long ms)
+        {
+            _initFailStreak++;
+            var now = DateTime.UtcNow;
+            bool firstOrChanged = _initFailStreak == 1 || code != _lastLoggedFailCode;
+            if (!firstOrChanged && (now - _lastFailLogUtc) < FailLogInterval) return;
+
+            var data = new Dictionary<string, object>
+            {
+                { "code", (int)code }, { "ms", ms }, { "attempts", _initFailStreak }
+            };
+            if (firstOrChanged)
+                Log.Error("govee_init_failed", LastError + FixHint(code, ms), data);
+            else
+                Log.Warn("govee_init_failed", LastError + " (still failing)", data);
+
+            _lastLoggedFailCode = code;
+            _lastFailLogUtc = now;
+        }
+
+        /// <summary>The fix to name in the first-failure ERROR. Timing matters for two codes,
+        /// split exactly as Explain splits them: the ~6s 1001 is the missing bindingRedirect
+        /// (a GUID hint would send the user to fix the one thing that is not broken), and only
+        /// a fast 100 is the elevated-Desktop pipe denial - a slow one is Desktop still
+        /// starting up, which the retry loop rides out.</summary>
+        static string FixHint(GoveeCode code, long ms)
+        {
+            switch (code)
+            {
+                case GoveeCode.ApiGuidError:
+                    return IsRejection(code, ms)
+                        ? " Fix: '/govee guid <value>' with the GUID from Govee Desktop > Settings > API."
+                        : " Fix: the GUID is probably fine - GoveeLightsDaemon.exe.config (the bindingRedirect) must sit beside the exe; see docs/API-NOTES.md.";
+                case GoveeCode.DesktopNotRunning:
+                    return " Fix: start Govee Desktop.";
+                case GoveeCode.ProgramError:
+                    return ms < 500
+                        ? " Fix: Govee Desktop is running as administrator - restart it normally."
+                        : " Govee Desktop may still be starting; the daemon keeps retrying on its own.";
+                default:
+                    return "";
             }
         }
 
